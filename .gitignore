@@ -1,4 +1,11 @@
-data/
-hw4/data/
-*.tar.gz
-push.ipynb
+# Ignore data folders
+/data/
+
+# Ignore secrets and configs
+.env
+secrets.json
+config.py
+
+# Ignore Python cache
+__pycache__/
+*.pyc
