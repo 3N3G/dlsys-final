@@ -86,6 +86,8 @@ class ResNet9(ndl.nn.Module):
         # Layer 11: Linear(128, 10)
         self.fc2 = nn.Linear(128, 10, device=device, dtype=dtype)
         
+        self.device = device
+        self.dtype  = dtype
         ### END YOUR SOLUTION
 
     def forward(self, x):

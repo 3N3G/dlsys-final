@@ -58,21 +58,21 @@ endif()
 
 # Set these up as variables to make reading the generated file easier
 set(CMAKE_COMMAND "/usr/local/lib/python3.12/dist-packages/cmake/data/bin/cmake") # path
-set(source_file "/content/drive/MyDrive/10714/hw4/src/ndarray_backend_cuda.cu") # path
-set(NVCC_generated_dependency_file "/content/drive/MyDrive/10714/hw4/build/CMakeFiles/ndarray_backend_cuda.dir/src/ndarray_backend_cuda_generated_ndarray_backend_cuda.cu.o.NVCC-depend") # path
-set(cmake_dependency_file "/content/drive/MyDrive/10714/hw4/build/CMakeFiles/ndarray_backend_cuda.dir/src/ndarray_backend_cuda_generated_ndarray_backend_cuda.cu.o.depend") # path
+set(source_file "/content/drive/MyDrive/10714/proj/src/ndarray_backend_cuda.cu") # path
+set(NVCC_generated_dependency_file "/content/drive/MyDrive/10714/proj/build/CMakeFiles/ndarray_backend_cuda.dir/src/ndarray_backend_cuda_generated_ndarray_backend_cuda.cu.o.NVCC-depend") # path
+set(cmake_dependency_file "/content/drive/MyDrive/10714/proj/build/CMakeFiles/ndarray_backend_cuda.dir/src/ndarray_backend_cuda_generated_ndarray_backend_cuda.cu.o.depend") # path
 set(CUDA_make2cmake "/usr/local/lib/python3.12/dist-packages/cmake/data/share/cmake-3.31/Modules/FindCUDA/make2cmake.cmake") # path
 set(CUDA_parse_cubin "/usr/local/lib/python3.12/dist-packages/cmake/data/share/cmake-3.31/Modules/FindCUDA/parse_cubin.cmake") # path
 set(build_cubin OFF) # bool
 set(CUDA_HOST_COMPILER "/usr/bin/cc") # path
 # We won't actually use these variables for now, but we need to set this, in
 # order to force this file to be run again if it changes.
-set(generated_file_path "/content/drive/MyDrive/10714/hw4/build/CMakeFiles/ndarray_backend_cuda.dir/src/.") # path
-set(generated_file_internal "/content/drive/MyDrive/10714/hw4/build/CMakeFiles/ndarray_backend_cuda.dir/src/./ndarray_backend_cuda_generated_ndarray_backend_cuda.cu.o") # path
-set(generated_cubin_file_internal "/content/drive/MyDrive/10714/hw4/build/CMakeFiles/ndarray_backend_cuda.dir/src/./ndarray_backend_cuda_generated_ndarray_backend_cuda.cu.o.cubin.txt") # path
+set(generated_file_path "/content/drive/MyDrive/10714/proj/build/CMakeFiles/ndarray_backend_cuda.dir/src/.") # path
+set(generated_file_internal "/content/drive/MyDrive/10714/proj/build/CMakeFiles/ndarray_backend_cuda.dir/src/./ndarray_backend_cuda_generated_ndarray_backend_cuda.cu.o") # path
+set(generated_cubin_file_internal "/content/drive/MyDrive/10714/proj/build/CMakeFiles/ndarray_backend_cuda.dir/src/./ndarray_backend_cuda_generated_ndarray_backend_cuda.cu.o.cubin.txt") # path
 
 set(CUDA_NVCC_EXECUTABLE "/usr/local/cuda/bin/nvcc") # path
-set(CUDA_NVCC_FLAGS  ;; -gencode;arch=compute_75,code=sm_75) # list
+set(CUDA_NVCC_FLAGS  ;; -gencode;arch=compute_37,code=sm_37) # list
 # Build specific configuration flags
 set(CUDA_NVCC_FLAGS_DEBUG  ; )
 set(CUDA_NVCC_FLAGS_MINSIZEREL  ; )

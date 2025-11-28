@@ -1,5 +1,5 @@
 CMakeFiles/ndarray_backend_cpu.dir/src/ndarray_backend_cpu.cc.o: \
- /content/drive/MyDrive/10714/hw4/src/ndarray_backend_cpu.cc \
+ /content/drive/MyDrive/10714/proj/src/ndarray_backend_cpu.cc \
  /usr/include/stdc-predef.h \
  /usr/local/lib/python3.12/dist-packages/pybind11/include/pybind11/numpy.h \
  /usr/local/lib/python3.12/dist-packages/pybind11/include/pybind11/pybind11.h \

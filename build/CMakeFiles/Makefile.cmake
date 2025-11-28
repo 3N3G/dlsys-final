@@ -7,10 +7,10 @@ set(CMAKE_DEPENDS_GENERATOR "Unix Makefiles")
 # The top level Makefile was generated from the following files:
 set(CMAKE_MAKEFILE_DEPENDS
   "CMakeCache.txt"
-  "/content/drive/MyDrive/10714/hw4/CMakeLists.txt"
-  "CMakeFiles/3.31.6/CMakeCCompiler.cmake"
-  "CMakeFiles/3.31.6/CMakeCXXCompiler.cmake"
-  "CMakeFiles/3.31.6/CMakeSystem.cmake"
+  "/content/drive/MyDrive/10714/proj/CMakeLists.txt"
+  "CMakeFiles/3.31.10/CMakeCCompiler.cmake"
+  "CMakeFiles/3.31.10/CMakeCXXCompiler.cmake"
+  "CMakeFiles/3.31.10/CMakeSystem.cmake"
   "CMakeFiles/ndarray_backend_cuda.dir/src/ndarray_backend_cuda_generated_ndarray_backend_cuda.cu.o.cmake.pre-gen"
   "CMakeFiles/ndarray_backend_cuda.dir/src/ndarray_backend_cuda_generated_ndarray_backend_cuda.cu.o.depend"
   "/usr/local/lib/python3.12/dist-packages/cmake/data/share/cmake-3.31/Modules/CMakeCInformation.cmake"
