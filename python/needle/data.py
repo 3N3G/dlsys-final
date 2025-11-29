@@ -142,7 +142,8 @@ class DataLoader:
 
         # Convert to Tensors
         X_tensor = Tensor(X_batch, device=self.device, dtype=self.dtype)
-        y_tensor = Tensor(y_batch, device=self.device, dtype="int32")
+        # Note: backend only supports float32, so we use float32 for labels too
+        y_tensor = Tensor(y_batch, device=self.device, dtype=self.dtype)
 
         return X_tensor, y_tensor
 
@@ -341,7 +342,8 @@ def get_batch(data, i, bptt, device=None, dtype="float32"):
     y = y.flatten()  # (seq_len * batch_size,)
 
     # Convert to Tensors
+    # Note: y contains integer labels but backend only supports float32
     X_tensor = Tensor(X, device=device, dtype=dtype, requires_grad=False)
-    y_tensor = Tensor(y, device=device, dtype=dtype, requires_grad=False)
+    y_tensor = Tensor(y.astype(np.float32), device=device, dtype=dtype, requires_grad=False)
 
     return X_tensor, y_tensor
