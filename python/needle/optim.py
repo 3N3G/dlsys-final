@@ -132,7 +132,7 @@ class Muon(Optimizer):
 
             # Normalize gradient (orthogonalization step)
             # This is a key component of Muon - gradient is normalized by its norm
-            grad_norm = (grad ** 2).sum() ** 0.5
+            grad_norm = ((grad ** 2).sum() ** 0.5).numpy().item()
             grad_normalized = grad / (grad_norm + 1e-8)
 
             # Momentum update with normalized gradient
