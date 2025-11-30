@@ -746,5 +746,3 @@ class Conv(TensorOp):
 
 def conv(a, b, stride=1, padding=1):
     return Conv(stride, padding)(a, b)
-
-
