@@ -1,3 +1,0 @@
-/home/geney/dlsys-final/build/CMakeFiles/ndarray_backend_cpu.dir
-/home/geney/dlsys-final/build/CMakeFiles/edit_cache.dir
-/home/geney/dlsys-final/build/CMakeFiles/rebuild_cache.dir

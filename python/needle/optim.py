@@ -240,33 +240,28 @@ class Muon(Optimizer):
             if p not in self.m:
                 self.m[p] = 0 * g
 
-            # Momentum update
+            # Momentum update: buf = buf * momentum + grad * (1 - momentum)
+            # This is equivalent to PyTorch's buf.lerp_(grad, 1 - momentum)
             buf = self.m[p]
-            buf = self.momentum * buf + g
+            buf = self.momentum * buf + (1.0 - self.momentum) * g
 
             # Nesterov momentum
             if self.nesterov:
-                update_grad = g + self.momentum * buf
+                # update = grad * (1 - momentum) + buf * momentum
+                update_grad = (1.0 - self.momentum) * g + self.momentum * buf
             else:
                 update_grad = buf
 
             # Only apply Newton-Schulz to 2D parameters (weights)
             # For biases and other 1D params, use the gradient as-is
             if len(p.shape) == 2:
-                # Normalize the weight (not the gradient!)
-                # This is key: w = w * sqrt(d) / ||w||
-                w_data = p.data
-                w_norm = ((w_data ** 2).sum() ** 0.5).numpy().item()
-                d = float(p.shape[0])  # Number of rows
-                w_normalized = w_data * (d ** 0.5) / (w_norm + self.eps)
-
                 # Orthogonalize the gradient using Newton-Schulz
                 update_grad_2d = update_grad.reshape((p.shape[0], -1))
                 update_orthogonal = self._zeropower_via_newtonschulz5(update_grad_2d)
                 update_orthogonal = update_orthogonal.reshape(p.shape)
 
-                # Update: w_new = w_normalized - lr * orthogonal_grad
-                new_w = w_normalized - self.lr * update_orthogonal
+                # Apply update (no weight normalization in PyTorch version!)
+                new_w = p.data - self.lr * update_orthogonal
             else:
                 # For 1D parameters (biases), just do standard update
                 new_w = p.data - self.lr * update_grad
