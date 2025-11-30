@@ -157,18 +157,15 @@ def test_muon_vs_reference():
     np.random.seed(42)
     torch.manual_seed(42)
 
-    # Create identical initial weights
+    # Create identical initial weights (no bias - PyTorch Muon only supports 2D params)
     print("\n1. Creating identical models...")
     w_init = np.random.randn(20, 10).astype(np.float32)
-    b_init = np.random.randn(20).astype(np.float32)
 
     # Needle model
     needle_w = ndl.Tensor(w_init.copy(), device=ndl.cpu(), dtype="float32", requires_grad=True)
-    needle_b = ndl.Tensor(b_init.copy(), device=ndl.cpu(), dtype="float32", requires_grad=True)
 
     # PyTorch model
     torch_w = torch.nn.Parameter(torch.from_numpy(w_init.copy()))
-    torch_b = torch.nn.Parameter(torch.from_numpy(b_init.copy()))
 
     # Create identical input and target
     print("2. Creating identical data...")
@@ -185,8 +182,8 @@ def test_muon_vs_reference():
     print("3. Creating optimizers...")
     lr = 0.02
     momentum = 0.95
-    needle_opt = ndl.optim.Muon([needle_w, needle_b], lr=lr, momentum=momentum, nesterov=False)
-    torch_opt = torch.optim.Muon([torch_w, torch_b], lr=lr, momentum=momentum, nesterov=False)
+    needle_opt = ndl.optim.Muon([needle_w], lr=lr, momentum=momentum, nesterov=False)
+    torch_opt = torch.optim.Muon([torch_w], lr=lr, momentum=momentum, nesterov=False)
 
     print("4. Running training steps...")
     num_steps = 3
@@ -194,13 +191,13 @@ def test_muon_vs_reference():
     for step in range(num_steps):
         # Needle forward and backward
         needle_opt.reset_grad()
-        logits_needle = X_needle @ needle_w.transpose() + needle_b.reshape((1, 20)).broadcast_to((8, 20))
+        logits_needle = X_needle @ needle_w.transpose()
         loss_needle = ndl.nn.SoftmaxLoss()(logits_needle, y_needle)
         loss_needle.backward()
 
         # PyTorch forward and backward
         torch_opt.zero_grad()
-        logits_torch = X_torch @ torch_w.T + torch_b
+        logits_torch = X_torch @ torch_w.T
         loss_torch = tnn.functional.cross_entropy(logits_torch, y_torch)
         loss_torch.backward()
 
@@ -230,32 +227,17 @@ def test_muon_vs_reference():
         print(f"   Weight update max diff: {max_diff:.6e}")
         print(f"   Weight update rel error: {rel_error:.6e}")
 
-        # Also compare bias updates (should be identical since no orthogonalization)
-        needle_b_after = needle_b.numpy()
-        torch_b_after = torch_b.detach().numpy()
-        needle_b_update = needle_b_after - b_init
-        torch_b_update = torch_b_after - b_init
-        b_diff = np.abs(needle_b_update - torch_b_update)
-        b_max_diff = np.max(b_diff)
-
-        print(f"   Bias update max diff: {b_max_diff:.6e}")
-
-        # Store bias for next iteration
-        b_init = needle_b_after.copy()
-
     print("\n5. Checking final results...")
     # Final comparison
     final_w_diff = np.max(np.abs(needle_w.numpy() - torch_w.detach().numpy()))
-    final_b_diff = np.max(np.abs(needle_b.numpy() - torch_b.detach().numpy()))
 
     print(f"   Final weight diff: {final_w_diff:.6e}")
-    print(f"   Final bias diff: {final_b_diff:.6e}")
 
     # Check if differences are within acceptable tolerance
     # Allow some numerical differences due to implementation details
     tolerance = 1e-4
 
-    if final_w_diff < tolerance and final_b_diff < tolerance:
+    if final_w_diff < tolerance:
         print("\n" + "=" * 60)
         print("✓ PASS: Needle Muon matches PyTorch reference!")
         print("=" * 60)
@@ -264,7 +246,6 @@ def test_muon_vs_reference():
         print("⚠️  WARNING: Some numerical differences detected")
         print("=" * 60)
         print(f"Weight diff {final_w_diff:.6e} (tolerance: {tolerance})")
-        print(f"Bias diff {final_b_diff:.6e} (tolerance: {tolerance})")
         print("\nThis may be due to:")
         print("  - Floating point precision differences")
         print("  - Different norm computation (Frobenius vs spectral)")
