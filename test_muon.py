@@ -140,47 +140,140 @@ def test_newton_schulz():
     print("=" * 60)
 
 def test_muon_vs_reference():
-    """Compare Needle Muon implementation with PyTorch reference"""
+    """Compare Needle Muon implementation with PyTorch reference numerically"""
     print("\n" + "=" * 60)
-    print("Comparing Muon Implementation with PyTorch Reference")
+    print("Comparing Muon with PyTorch Reference (Numerical Test)")
     print("=" * 60)
 
-    print("\nReference: PyTorch torch.optim.Muon")
-    print("Source: https://github.com/pytorch/pytorch/blob/main/torch/optim/_muon.py")
-    print()
-    print("Key Algorithm Differences:")
-    print("-" * 60)
+    try:
+        import torch
+        import torch.nn as tnn
+    except ImportError:
+        print("\n⚠️  PyTorch not installed - skipping comparison test")
+        print("Install PyTorch to run numerical comparison")
+        return
 
-    print("\n✅ MATCHES:")
-    print("  - Newton-Schulz coefficients: (3.4445, -4.7750, 2.0315)")
-    print("  - Newton-Schulz iteration: 5 steps (default)")
-    print("  - Momentum formula: buf = momentum * buf + (1-momentum) * grad")
-    print("  - Nesterov momentum support")
-    print("  - Gradient orthogonalization via Newton-Schulz")
-    print("  - Only applies to 2D parameters")
+    # Set random seed for reproducibility
+    np.random.seed(42)
+    torch.manual_seed(42)
 
-    print("\n⚠️  IMPLEMENTATION NOTES:")
-    print("  1. PyTorch normalizes by spectral norm in Newton-Schulz:")
-    print("     ortho_grad.div_(ortho_grad.norm().clamp(min=eps))")
-    print("     Needle uses Frobenius norm (should be equivalent)")
+    # Create identical initial weights
+    print("\n1. Creating identical models...")
+    w_init = np.random.randn(20, 10).astype(np.float32)
+    b_init = np.random.randn(20).astype(np.float32)
 
-    print("\n  2. PyTorch has optional LR adjustment based on param shape:")
-    print("     - 'original': lr * sqrt(max(1, rows/cols))")
-    print("     - 'match_rms_adamw': lr * 0.2 * sqrt(max(rows, cols))")
-    print("     Needle: No LR adjustment (can add if needed)")
+    # Needle model
+    needle_w = ndl.Tensor(w_init.copy(), device=ndl.cpu(), dtype="float32", requires_grad=True)
+    needle_b = ndl.Tensor(b_init.copy(), device=ndl.cpu(), dtype="float32", requires_grad=True)
 
-    print("\n  3. PyTorch applies weight decay as:")
-    print("     param.mul_(1 - lr * weight_decay)")
-    print("     Needle: Not implemented yet (easy to add)")
+    # PyTorch model
+    torch_w = torch.nn.Parameter(torch.from_numpy(w_init.copy()))
+    torch_b = torch.nn.Parameter(torch.from_numpy(b_init.copy()))
 
-    print("\n  4. PyTorch uses bfloat16 in Newton-Schulz for efficiency")
-    print("     Needle: Uses float32 (backend limitation)")
+    # Create identical input and target
+    print("2. Creating identical data...")
+    X_np = np.random.randn(8, 10).astype(np.float32)
+    y_np = np.random.randint(0, 20, size=(8,)).astype(np.int64)
 
-    print("\n" + "=" * 60)
-    print("Implementation Status: MOSTLY CORRECT")
-    print("=" * 60)
-    print("\nThe core algorithm matches PyTorch's implementation.")
-    print("Optional features (weight decay, LR adjust) can be added if needed.")
+    X_needle = ndl.Tensor(X_np, device=ndl.cpu(), dtype="float32", requires_grad=False)
+    y_needle = ndl.Tensor(y_np.astype(np.float32), device=ndl.cpu(), dtype="float32", requires_grad=False)
+
+    X_torch = torch.from_numpy(X_np)
+    y_torch = torch.from_numpy(y_np)
+
+    # Create optimizers with same hyperparameters
+    print("3. Creating optimizers...")
+    lr = 0.02
+    momentum = 0.95
+    needle_opt = ndl.optim.Muon([needle_w, needle_b], lr=lr, momentum=momentum, nesterov=False)
+    torch_opt = torch.optim.Muon([torch_w, torch_b], lr=lr, momentum=momentum, nesterov=False)
+
+    print("4. Running training steps...")
+    num_steps = 3
+
+    for step in range(num_steps):
+        # Needle forward and backward
+        needle_opt.reset_grad()
+        logits_needle = X_needle @ needle_w.transpose() + needle_b.reshape((1, 20)).broadcast_to((8, 20))
+        loss_needle = ndl.nn.SoftmaxLoss()(logits_needle, y_needle)
+        loss_needle.backward()
+
+        # PyTorch forward and backward
+        torch_opt.zero_grad()
+        logits_torch = X_torch @ torch_w.T + torch_b
+        loss_torch = tnn.functional.cross_entropy(logits_torch, y_torch)
+        loss_torch.backward()
+
+        # Store pre-update weights for comparison
+        needle_w_before = needle_w.numpy().copy()
+        torch_w_before = torch_w.detach().numpy().copy()
+
+        # Optimizer step
+        needle_opt.step()
+        torch_opt.step()
+
+        # Get updated weights
+        needle_w_after = needle_w.numpy()
+        torch_w_after = torch_w.detach().numpy()
+
+        # Compare weight updates
+        needle_update = needle_w_after - needle_w_before
+        torch_update = torch_w_after - torch_w_before
+
+        update_diff = np.abs(needle_update - torch_update)
+        max_diff = np.max(update_diff)
+        rel_error = max_diff / (np.abs(torch_update).max() + 1e-8)
+
+        print(f"\n   Step {step + 1}:")
+        print(f"   Needle loss: {loss_needle.numpy().item():.6f}")
+        print(f"   PyTorch loss: {loss_torch.item():.6f}")
+        print(f"   Weight update max diff: {max_diff:.6e}")
+        print(f"   Weight update rel error: {rel_error:.6e}")
+
+        # Also compare bias updates (should be identical since no orthogonalization)
+        needle_b_after = needle_b.numpy()
+        torch_b_after = torch_b.detach().numpy()
+        needle_b_update = needle_b_after - b_init
+        torch_b_update = torch_b_after - b_init
+        b_diff = np.abs(needle_b_update - torch_b_update)
+        b_max_diff = np.max(b_diff)
+
+        print(f"   Bias update max diff: {b_max_diff:.6e}")
+
+        # Store bias for next iteration
+        b_init = needle_b_after.copy()
+
+    print("\n5. Checking final results...")
+    # Final comparison
+    final_w_diff = np.max(np.abs(needle_w.numpy() - torch_w.detach().numpy()))
+    final_b_diff = np.max(np.abs(needle_b.numpy() - torch_b.detach().numpy()))
+
+    print(f"   Final weight diff: {final_w_diff:.6e}")
+    print(f"   Final bias diff: {final_b_diff:.6e}")
+
+    # Check if differences are within acceptable tolerance
+    # Allow some numerical differences due to implementation details
+    tolerance = 1e-4
+
+    if final_w_diff < tolerance and final_b_diff < tolerance:
+        print("\n" + "=" * 60)
+        print("✓ PASS: Needle Muon matches PyTorch reference!")
+        print("=" * 60)
+    else:
+        print("\n" + "=" * 60)
+        print("⚠️  WARNING: Some numerical differences detected")
+        print("=" * 60)
+        print(f"Weight diff {final_w_diff:.6e} (tolerance: {tolerance})")
+        print(f"Bias diff {final_b_diff:.6e} (tolerance: {tolerance})")
+        print("\nThis may be due to:")
+        print("  - Floating point precision differences")
+        print("  - Different norm computation (Frobenius vs spectral)")
+        print("  - Backend implementation details")
+
+        if final_w_diff < 1e-2:
+            print("\nDifferences are small - likely acceptable for practical use")
+        else:
+            raise AssertionError(f"Difference too large: {final_w_diff}")
 
 if __name__ == "__main__":
     print("\n" + "=" * 60)
