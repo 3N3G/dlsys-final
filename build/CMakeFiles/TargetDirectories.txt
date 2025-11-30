@@ -1,4 +1,3 @@
-/content/drive/MyDrive/10714/proj/build/CMakeFiles/ndarray_backend_cpu.dir
-/content/drive/MyDrive/10714/proj/build/CMakeFiles/ndarray_backend_cuda.dir
-/content/drive/MyDrive/10714/proj/build/CMakeFiles/edit_cache.dir
-/content/drive/MyDrive/10714/proj/build/CMakeFiles/rebuild_cache.dir
+/home/geney/dlsys-final/build/CMakeFiles/ndarray_backend_cpu.dir
+/home/geney/dlsys-final/build/CMakeFiles/edit_cache.dir
+/home/geney/dlsys-final/build/CMakeFiles/rebuild_cache.dir

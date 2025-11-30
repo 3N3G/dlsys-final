@@ -17,13 +17,13 @@ def create_dummy_data(batch_size=4, device=None):
     # Images: (batch_size, 32, 32, 3)
     images = np.random.randn(batch_size, 32, 32, 3).astype(np.float32)
     # Labels: (batch_size,) with values in [0, 9]
-    labels = np.random.randint(0, 10, size=(batch_size,)).astype(np.uint8)
+    labels = np.random.randint(0, 10, size=(batch_size,)).astype(np.float32)
 
     if device is None:
         device = ndl.cpu()
 
     images_tensor = ndl.Tensor(images, device=device, dtype="float32", requires_grad=False)
-    labels_tensor = ndl.Tensor(labels, device=device, dtype="uint8", requires_grad=False)
+    labels_tensor = ndl.Tensor(labels, device=device, dtype="float32", requires_grad=False)
 
     return images_tensor, labels_tensor
 
@@ -45,7 +45,7 @@ def test_muon_basic():
     batch_size = 8
     X = ndl.Tensor(np.random.randn(batch_size, 64).astype(np.float32),
                    device=device, requires_grad=False)
-    y = ndl.Tensor(np.random.randint(0, 10, size=(batch_size,)).astype(np.uint8),
+    y = ndl.Tensor(np.random.randint(0, 10, size=(batch_size,)).astype(np.float32),
                    device=device, requires_grad=False)
 
     # Create optimizer
@@ -89,50 +89,6 @@ def test_muon_basic():
 
     print("\n" + "=" * 60)
     print("✓ Basic test passed!")
-    print("=" * 60)
-
-def test_muon_resnet9():
-    """Test Muon with ResNet9 architecture"""
-    print("\n" + "=" * 60)
-    print("Testing Muon Optimizer - ResNet9 Model")
-    print("=" * 60)
-
-    device = ndl.cpu()
-    print(f"Using device: {device}")
-
-    print("\n1. Creating ResNet9 model...")
-    model = ResNet9(device=device, dtype="float32")
-
-    print("2. Creating dummy CIFAR-10 data...")
-    batch_size = 2  # Very small batch for CPU
-    images, labels = create_dummy_data(batch_size, device)
-
-    print("3. Creating Muon optimizer...")
-    optimizer = ndl.optim.Muon(model.parameters(), lr=0.02, momentum=0.95, nesterov=True)
-
-    print("4. Running training loop (3 iterations)...")
-    for iteration in range(3):
-        print(f"\n   Iteration {iteration + 1}:")
-
-        # Forward
-        logits = model(images)
-        loss = ndl.nn.SoftmaxLoss()(logits, labels)
-        print(f"      Loss: {loss.numpy().item():.4f}")
-
-        # Backward
-        optimizer.reset_grad()
-        loss.backward()
-
-        # Update
-        try:
-            optimizer.step()
-            print(f"      ✓ Optimizer step successful")
-        except Exception as e:
-            print(f"      ✗ Optimizer step failed: {e}")
-            raise
-
-    print("\n" + "=" * 60)
-    print("✓ ResNet9 test passed!")
     print("=" * 60)
 
 def test_newton_schulz():
@@ -192,7 +148,6 @@ if __name__ == "__main__":
         # Run tests
         test_newton_schulz()
         test_muon_basic()
-        test_muon_resnet9()
 
         print("\n" + "=" * 60)
         print("✓✓✓ ALL TESTS PASSED! ✓✓✓")

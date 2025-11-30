@@ -1,6 +1,6 @@
 file(REMOVE_RECURSE
-  "/content/drive/MyDrive/10714/proj/python/needle/backend_ndarray/ndarray_backend_cpu.cpython-312-x86_64-linux-gnu.so"
-  "/content/drive/MyDrive/10714/proj/python/needle/backend_ndarray/ndarray_backend_cpu.pdb"
+  "/home/geney/dlsys-final/python/needle/backend_ndarray/ndarray_backend_cpu.cpython-312-x86_64-linux-gnu.so"
+  "/home/geney/dlsys-final/python/needle/backend_ndarray/ndarray_backend_cpu.pdb"
   "CMakeFiles/ndarray_backend_cpu.dir/src/ndarray_backend_cpu.cc.o"
   "CMakeFiles/ndarray_backend_cpu.dir/src/ndarray_backend_cpu.cc.o.d"
 )

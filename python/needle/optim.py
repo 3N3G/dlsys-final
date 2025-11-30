@@ -257,7 +257,7 @@ class Muon(Optimizer):
                 # This is key: w = w * sqrt(d) / ||w||
                 w_data = p.data
                 w_norm = ((w_data ** 2).sum() ** 0.5).numpy().item()
-                d = float(len(p.data))  # Number of rows
+                d = float(p.shape[0])  # Number of rows
                 w_normalized = w_data * (d ** 0.5) / (w_norm + self.eps)
 
                 # Orthogonalize the gradient using Newton-Schulz
