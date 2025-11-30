@@ -151,77 +151,80 @@ class Adam(Optimizer):
 
 class Muon(Optimizer):
     """
-    Muon-like optimizer for Needle.
+    Muon optimizer - Momentum with Orthogonalization via Newton-Schulz iteration.
 
-    - Momentum-based updates
-    - Per-layer fan-out scaling (lr ~ 1/sqrt(fan_out))
-    - Row-wise normalization of updates for matrix-shaped params
+    Based on the reference implementation from:
+    https://github.com/KellerJordan/cifar10-airbench/blob/master/airbench94_muon.py
+
+    Key components:
+    1. Weight normalization before update
+    2. Newton-Schulz iteration for gradient orthogonalization
+    3. Momentum-based updates
     """
     def __init__(
         self,
         params,
         lr=0.02,
         momentum=0.95,
-        nesterov=True,
-        weight_decay=0.0,
-        eps=1e-8,
+        nesterov=False,
+        ns_steps=5,
+        eps=1e-7,
     ):
         super().__init__(params)
         self.lr = lr
         self.momentum = momentum
         self.nesterov = nesterov
-        self.weight_decay = weight_decay
+        self.ns_steps = ns_steps  # Newton-Schulz iteration steps
         self.eps = eps
         self.t = 0
 
-        # Momentum buffer (NDArray) per param
+        # Momentum buffer
         self.m = {}
-        # Per-param LR scale (1/sqrt(fan_out))
-        self.layer_lr_scale = {}
 
-        for p in self.params:
-            try:
-                shape = p.data.shape  # NDArray shape
-            except Exception:
-                self.layer_lr_scale[p] = 1.0
-                continue
-
-            if len(shape) >= 2:
-                fan_out = shape[0]
-                self.layer_lr_scale[p] = 1.0 / (fan_out ** 0.5)
-            else:
-                self.layer_lr_scale[p] = 1.0
-
-    def _row_normalize(self, update):
+    def _zeropower_via_newtonschulz5(self, G):
         """
-        Row-wise L2 normalization for matrix-shaped updates.
+        Newton-Schulz iteration to compute the zeroth power / orthogonalization of G.
 
-        update: NDArray with shape (out_dim, ...)
-        returns: NDArray with each row normalized to unit norm.
+        This iteration computes an approximation to G @ (G^T @ G)^{-1/2}, which is
+        the orthogonalization of G (analogous to computing UV^T from SVD G = USV^T).
+
+        Args:
+            G: Tensor of shape (m, n) representing gradient
+
+        Returns:
+            Orthogonalized gradient of same shape as G
         """
-        shape = update.shape
-        if len(shape) < 2:
-            # Scalar / vector / 1D: skip row-wise normalization
-            return update
+        import needle as ndl
 
-        out_dim = shape[0]
+        assert len(G.shape) == 2, "Newton-Schulz iteration requires 2D tensor"
 
-        # Flatten all but first dim: (out_dim, -1)
-        update_mat = update.reshape((out_dim, -1))
+        # Coefficients optimized for convergence
+        a, b, c = (3.4445, -4.7750, 2.0315)
 
-        # Row norms: sqrt(sum_j update_mat[i, j]^2)
-        squared = update_mat * update_mat
-        row_norms = squared.sum(axes=1) ** 0.5   # shape (out_dim,)
-        row_norms = row_norms.reshape((out_dim, 1))
+        # Start with normalized G
+        X = G
+        # Normalize by Frobenius norm to ensure top singular value <= 1
+        norm = ((X ** 2).sum() ** 0.5).numpy().item()
+        X = X / (norm + self.eps)
 
-        # Manually broadcast row_norms to the same shape as update_mat
-        row_norms_full = row_norms.broadcast_to(update_mat.shape)
+        # Transpose if needed (work with smaller matrix)
+        if G.shape[0] > G.shape[1]:
+            X = X.transpose()
 
-        # Avoid divide-by-zero
-        update_mat = update_mat / (row_norms_full + self.eps)
+        # Newton-Schulz iterations
+        for _ in range(self.ns_steps):
+            # A = X @ X^T
+            A = X @ X.transpose()
+            # B = b*A + c*A^2
+            B = b * A + c * (A @ A)
+            # X = a*X + B @ X
+            X = a * X + B @ X
 
-        # Reshape back to original shape
-        return update_mat.reshape(shape)
+        # Transpose back if needed
+        if G.shape[0] > G.shape[1]:
+            X = X.transpose()
+
+        return X
 
     def step(self):
         self.t += 1
@@ -230,42 +233,49 @@ class Muon(Optimizer):
             if p.grad is None:
                 continue
 
-            # NDArray weights & grads
-            w = p.data          # NDArray
-            g = p.grad.data     # NDArray
+            # Get gradient
+            g = p.grad.data
 
-            # Initialize momentum buffer on same device/shape as grad
+            # Initialize momentum buffer
             if p not in self.m:
                 self.m[p] = 0 * g
 
-            # Gradient with weight decay
-            grad = g + self.weight_decay * w
+            # Momentum update
+            buf = self.m[p]
+            buf = self.momentum * buf + g
 
-            # Momentum (before normalization)
-            m_prev = self.m[p]
-            m = self.momentum * m_prev + (1.0 - self.momentum) * grad
-
-            # Row-normalize momentum for matrix-shaped params
-            m_norm = self._row_normalize(m)
-
+            # Nesterov momentum
             if self.nesterov:
-                # Look-ahead + normalize again
-                update_direction = self.momentum * m_norm + (1.0 - self.momentum) * grad
-                update_direction = self._row_normalize(update_direction)
+                update_grad = g + self.momentum * buf
             else:
-                update_direction = m_norm
+                update_grad = buf
 
-            lr_scale = self.layer_lr_scale.get(p, 1.0)
-            effective_lr = self.lr * lr_scale
+            # Only apply Newton-Schulz to 2D parameters (weights)
+            # For biases and other 1D params, use the gradient as-is
+            if len(p.shape) == 2:
+                # Normalize the weight (not the gradient!)
+                # This is key: w = w * sqrt(d) / ||w||
+                w_data = p.data
+                w_norm = ((w_data ** 2).sum() ** 0.5).numpy().item()
+                d = float(len(p.data))  # Number of rows
+                w_normalized = w_data * (d ** 0.5) / (w_norm + self.eps)
 
-            # Apply update on NDArray
-            new_w = w - effective_lr * update_direction
+                # Orthogonalize the gradient using Newton-Schulz
+                update_grad_2d = update_grad.reshape((p.shape[0], -1))
+                update_orthogonal = self._zeropower_via_newtonschulz5(update_grad_2d)
+                update_orthogonal = update_orthogonal.reshape(p.shape)
 
-            # Write back to Tensor
+                # Update: w_new = w_normalized - lr * orthogonal_grad
+                new_w = w_normalized - self.lr * update_orthogonal
+            else:
+                # For 1D parameters (biases), just do standard update
+                new_w = p.data - self.lr * update_grad
+
+            # Write back to parameter
             p.data = type(p)(new_w, dtype=p.dtype, device=p.device)
 
             # Store momentum
-            self.m[p] = m
+            self.m[p] = buf
 
 
 
