@@ -121,6 +121,21 @@ class ReLU(Module):
         return ops.relu(x)
         ### END YOUR SOLUTION
 
+class GELU(Module):
+    """
+    Approximate GELU:
+        0.5 * x * (1 + tanh( sqrt(2/pi) * (x + 0.044715 * x^3) ))
+    """
+    def __init__(self):
+        super().__init__()
+        # sqrt(2/pi)
+        self.c = 0.7978845608028654  
+
+    def forward(self, x):
+        return 0.5 * x * (
+            1.0 + ops.tanh(self.c * (x + 0.044715 * (x ** 3)))
+        )
+
 class Sequential(Module):
     def __init__(self, *modules: Module) -> None:
         super().__init__()
@@ -216,6 +231,72 @@ class BatchNorm2d(BatchNorm1d):
         _x = x.transpose((1, 2)).transpose((2, 3)).reshape((s[0] * s[2] * s[3], s[1]))
         y = super().forward(_x).reshape((s[0], s[2], s[3], s[1]))
         return y.transpose((2,3)).transpose((1,2))
+
+# class BatchNorm2d(BatchNorm1d):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
+
+#     def forward(self, x: Tensor):
+#         # Expect NCHW
+#         s = x.shape
+#         assert len(s) == 4, f"BatchNorm2d expects 4D input (N,C,H,W), got {s}"
+#         N, C, H, W = s
+
+#         # NCHW -> NHWC
+#         x_nhwc = x.transpose((1, 2)).transpose((2, 3))  # (N, H, W, C)
+
+#         # Flatten spatial + batch dims, keep channels = C
+#         # Shape becomes (N * H * W, C), but we let reshape infer N*H*W
+#         x_flat = x_nhwc.reshape((-1, C))
+
+#         # Apply 1D batchnorm on the last dim (C)
+#         y_flat = super().forward(x_flat)  # (N*H*W, C)
+
+#         # Unflatten back to (N, H, W, C)
+#         y_nhwc = y_flat.reshape((N, H, W, C))
+
+#         # NHWC -> NCHW
+#         y_nchw = y_nhwc.transpose((2, 3)).transpose((1, 2))
+#         return y_nchw
+
+
+class MaxPool2d(Module):
+    def __init__(self, kernel_size: int, stride: int | None = None):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.stride = stride if stride is not None else kernel_size
+
+    def forward(self, x: Tensor) -> Tensor:
+        # Expect NCHW
+        s = x.shape
+        assert len(s) == 4, f"MaxPool2d expects 4D input (N,C,H,W), got {s}"
+        N, C, H, W = s
+
+        # NCHW -> NHWC
+        x_nhwc = x.transpose((1, 2)).transpose((2, 3))   # (N, H, W, C)
+
+        # Call backend max_pool
+        y = ops.max_pool(x_nhwc, self.kernel_size, self.stride)
+        ys = y.shape
+
+        # --- Fix: handle the extra dimension your current max_pool is adding ---
+        # We are currently seeing (N, 1, H_out, W_out, C)
+        if len(ys) == 5 and ys[1] == 1:
+            N2, one, H_out, W_out, C2 = ys
+            assert N2 == N and one == 1 and C2 == C, f"Unexpected max_pool shape {ys}"
+            # Drop the dummy dim: (N, 1, H_out, W_out, C) -> (N, H_out, W_out, C)
+            y = y.reshape((N, H_out, W_out, C))
+            ys = y.shape
+
+        # Otherwise we expect NHWC
+        if len(ys) != 4:
+            raise ValueError(f"MaxPool2d: unexpected shape from ops.max_pool: {ys}")
+
+        # NHWC -> NCHW
+        y_nchw = y.transpose((2, 3)).transpose((1, 2))   # (N, C, H_out, W_out)
+        return y_nchw
+
+
 
 class LayerNorm1d(Module):
     def __init__(self, dim: int, eps: float = 1e-5,

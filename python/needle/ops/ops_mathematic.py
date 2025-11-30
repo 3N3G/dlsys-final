@@ -610,6 +610,89 @@ class UnDilate(TensorOp):
 def undilate(a, axes, dilation):
     return UnDilate(axes, dilation)(a)
 
+class MaxPool(TensorOp):
+    def __init__(self, kernel_size: int, stride: int = 1):
+        self.kernel_size = kernel_size
+        self.stride = stride
+
+    def compute(self, x: NDArray) -> NDArray:
+        # (Your existing compute implementation is correct)
+        k = self.kernel_size
+        s = self.stride
+        N, H, W, C = x.shape
+
+        H_out = (H - k) // s + 1
+        W_out = (W - k) // s + 1
+        
+        # Create strided view
+        Ns, Hs, Ws, Cs = x.strides
+        window_shape = (N, H_out, W_out, k, k, C)
+        window_strides = (Ns, Hs * s, Ws * s, Hs, Ws, Cs)
+        
+        x_windows = x.as_strided(shape=window_shape, strides=window_strides)
+        x_flat = x_windows.compact().reshape((N, H_out, W_out, k * k, C))
+        
+        out = x_flat[:, :, :, 0, :]
+        for idx in range(1, k * k):
+            elem = x_flat[:, :, :, idx, :]
+            out = array_api.maximum(out, elem)
+            
+        return out.reshape((N, H_out, W_out, C))
+
+    def gradient(self, out_grad: Tensor, node: Tensor) -> Tuple[Tensor]:
+        # 1. Access raw data arrays
+        x_data = node.inputs[0].realize_cached_data()
+        grad_data = out_grad.realize_cached_data()
+        
+        k = self.kernel_size
+        s = self.stride
+        N, H, W, C = x_data.shape
+        H_out, W_out = grad_data.shape[1], grad_data.shape[2]
+
+        # 2. Create a zero-filled container for the input gradient
+        input_grad = x_data.device.full(x_data.shape, 0.0, dtype=x_data.dtype)
+
+        # 3. Iterate over the windows
+        for i in range(H_out):
+            h_start = i * s
+            h_end = h_start + k
+            for j in range(W_out):
+                w_start = j * s
+                w_end = w_start + k
+                
+                # Shape: (N, k, k, C)
+                input_window = x_data[:, h_start:h_end, w_start:w_end, :]
+                
+                # Shape: (N, C)
+                grad_val = grad_data[:, i, j, :]
+                
+                # Calculate max: (N, k, k, C) -> (N, 1, 1, C)
+                # We chain two reductions because the backend might not support tuple axes
+                window_max = input_window.max(axis=2, keepdims=True).max(axis=1, keepdims=True)
+                
+                # (N, 1, 1, C) -> (N, k, k, C)
+                window_max = window_max.broadcast_to(input_window.shape)
+                
+                # Now shapes match exactly: (N, k, k, C) == (N, k, k, C)
+                mask = (input_window == window_max)
+                
+                # Reshape grad to (N, 1, 1, C)
+                grad_val_reshaped = grad_val.compact().reshape((N, 1, 1, C))
+                
+                # Broadcast grad to (N, k, k, C) before multiplying
+                grad_val_broadcasted = grad_val_reshaped.broadcast_to(input_window.shape)
+                
+                # Apply mask
+                grad_window = grad_val_broadcasted * mask
+                
+                # Accumulate
+                input_grad[:, h_start:h_end, w_start:w_end, :] += grad_window
+
+        return (Tensor(input_grad, device=out_grad.device, dtype=out_grad.dtype),)
+
+def max_pool(a, kernel_size=2, stride=2):
+    return MaxPool(kernel_size, stride)(a)
+
 
 class Conv(TensorOp):
     def __init__(self, stride: Optional[int] = 1, padding: Optional[int] = 0):

@@ -14,6 +14,81 @@ import math
 import numpy as np
 np.random.seed(0)
 
+class ConvGroup(nn.Module):
+    def __init__(self, in_channels, out_channels, device=None, dtype="float32"):
+        super().__init__()
+        self.conv1 = nn.Conv(in_channels, out_channels, 3, 1, device=device, dtype=dtype)
+        self.pool  = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.bn1   = nn.BatchNorm2d(out_channels, device=device, dtype=dtype)
+
+        self.conv2 = nn.Conv(out_channels, out_channels, 3, 1, device=device, dtype=dtype)
+        self.bn2   = nn.BatchNorm2d(out_channels, device=device, dtype=dtype)
+
+        self.act   = nn.GELU()
+
+    def forward(self, x):
+        # x: (N, H, W, C)
+        x = self.conv1(x)
+        x = self.pool(x)
+        x = self.bn1(x)
+
+        x = self.conv2(x)
+        x = self.bn2(x)
+        x = self.act(x)
+        return x
+
+class CifarNetNeedle(nn.Module):
+    def __init__(self, device=None, dtype="float32"):
+        super().__init__()
+
+        # 1) Whitening conv: Conv2d(3, 24, kernel_size=2, stride=1)
+        self.whiten = nn.Conv(3, 24, 2, 1, device=device, dtype=dtype)
+        self.whiten_act = nn.GELU()
+
+        # 2) Conv groups
+        self.group1 = ConvGroup(24,  64, device=device, dtype=dtype)
+        self.group2 = ConvGroup(64, 256, device=device, dtype=dtype)
+        self.group3 = ConvGroup(256, 256, device=device, dtype=dtype)
+
+        # 3) Final pooling: MaxPool2d(kernel_size=3, stride=3)
+        self.final_pool = nn.MaxPool2d(kernel_size=3, stride=3)
+
+        # 4) Head: Linear(256, 10)
+        # In the PyTorch version head is bias=False, we can mirror that
+        self.head = nn.Linear(256, 10, bias=True, device=device, dtype=dtype)
+
+        self.device = device
+        self.dtype  = dtype
+
+    def forward(self, x):
+        # x: (N, 32, 32, 3), from CIFAR10Dataset
+        x = self.whiten(x)
+        x = self.whiten_act(x)
+
+        x = self.group1(x)
+        x = self.group2(x)
+        x = self.group3(x)
+
+        x = self.final_pool(x)     # (N, H', W', 256)
+
+        # Flatten spatial dims
+        N = x.shape[0]
+        x = x.reshape((N, -1))     # (N, 256 * H' * W')
+
+        # In the PyTorch CifarNet, after all the pooling, H' and W' are 1,
+        # so this is just (N, 256). Even if your Needle conv shapes differ
+        # slightly, flattening still works with a linear layer.
+        # If you want to be strict, you can verify H' and W' by printing x.shape.
+
+        # If you find x.shape[1] != 256, then change:
+        #   self.head = nn.Linear(256, 10, ...)
+        # to:
+        #   self.head = nn.Linear(x.shape[1], 10, ...)
+        # and reinitialize.
+
+        logits = self.head(x)
+        return logits
+
 
 
 class ResNet9(ndl.nn.Module):
