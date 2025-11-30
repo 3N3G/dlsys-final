@@ -196,11 +196,17 @@ def train_cifar10(model, dataloader, n_epochs=1, optimizer=ndl.optim.Adam,
     loss_module = loss_fn()
 
     last_acc, last_loss = 0.0, 0.0
-    for _ in tqdm(range(n_epochs)):
+    for epoch in range(n_epochs):
         last_acc, last_loss = epoch_general_cifar10(
             dataloader, model, loss_fn=loss_module, opt=opt
         )
-        print("ACCURACY ", last_acc, "LOSS ", last_loss)
+        test_acc, test_loss = evaluate_cifar10(model, dataloader)
+        print(
+            f"Epoch {epoch:02d} | "
+            f"train_acc={last_acc:.4f}, train_loss={last_loss:.4f} | "
+            f"test_acc={test_acc:.4f}, test_loss={test_loss:.4f}"
+        )
+        # print("ACCURACY ", last_acc, "LOSS ", last_loss)
         
     return last_acc, last_loss
     ### END YOUR SOLUTION
