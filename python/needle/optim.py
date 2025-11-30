@@ -269,8 +269,8 @@ class Muon(Optimizer):
             # Write back to parameter
             p.data = type(p)(new_w, dtype=p.dtype, device=p.device)
 
-            # Store momentum
-            self.m[p] = buf
+            # Store momentum (must store .data to prevent gradient accumulation)
+            self.m[p] = buf.data
 
 
 
