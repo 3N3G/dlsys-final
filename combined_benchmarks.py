@@ -209,7 +209,16 @@ def train_needle(model, dataloader, device, use_muon=False, muon_lr=0.24, muon_m
         train_correct = 0
         train_total = 0
 
-        for X, y in dataloader:
+        for X_np, y_np in dataloader:
+            # Convert numpy arrays to Needle tensors on the correct device
+            # DataLoader returns numpy arrays, need to convert to Tensors
+            if isinstance(X_np, ndl.Tensor):
+                X = X_np
+                y = y_np
+            else:
+                X = ndl.Tensor(X_np, device=device, dtype="float32")
+                y = ndl.Tensor(y_np, device=device, dtype="float32")
+
             for opt in optimizers:
                 opt.reset_grad()
 
@@ -221,9 +230,9 @@ def train_needle(model, dataloader, device, use_muon=False, muon_lr=0.24, muon_m
                 opt.step()
 
             pred = logits.numpy().argmax(axis=1)
-            y_np = y.numpy().astype(np.int32)
-            train_correct += (pred == y_np).sum()
-            train_total += y.shape[0]
+            y_actual = y.numpy().astype(np.int32)
+            train_correct += (pred == y_actual).sum()
+            train_total += y.numpy().shape[0]
 
         train_acc = train_correct / train_total
         if n_epochs <= 5:
@@ -265,8 +274,8 @@ def main():
 
         needle_device = ndl.cuda() if ndl.cuda().enabled() else ndl.cpu()
         needle_dataset = NeedleCIFAR10("data/cifar-10-batches-py", train=True)
-        needle_dataloader = NeedleDataLoader(needle_dataset, batch_size=batch_size,
-                                            shuffle=True, device=needle_device, dtype="float32")
+        # Needle DataLoader doesn't take device/dtype - data is converted in training loop
+        needle_dataloader = NeedleDataLoader(needle_dataset, batch_size=batch_size, shuffle=True)
         needle_available = True
         print(f"Needle device: {needle_device}")
     except Exception as e:
