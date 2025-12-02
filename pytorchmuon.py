@@ -1,364 +1,302 @@
-# FOR REFERENCE ONLY
-# mypy: allow-untyped-defs
-# mypy: disable-error-code=arg-type
-"""Implementation of the Muon optimizer."""
-
-import math
-from collections.abc import MutableMapping
-from typing import Optional
+import sys
+sys.path.append('./python')
+sys.path.append('./apps')
 
 import torch
-from torch import Tensor
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+import time
+import os
+import pickle
+import numpy as np
 
-from .optimizer import (
-    _disable_dynamo_if_unsupported,
-    _params_doc,
-    _to_scalar,
-    Optimizer,
-    ParamsT,
-)
+# Muon optimizer (from airbench94)
+@torch.compile
+def zeropower_via_newtonschulz5(G, steps=3, eps=1e-7):
+    """Newton-Schulz iteration"""
+    assert len(G.shape) == 2
+    a, b, c = (3.4445, -4.7750, 2.0315)
+    X = G.bfloat16()
+    X /= (X.norm() + eps)
+    if G.size(0) > G.size(1):
+        X = X.T
+    for _ in range(steps):
+        A = X @ X.T
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+    if G.size(0) > G.size(1):
+        X = X.T
+    return X
 
-
-__all__ = ["Muon"]
-
-# Constants from Keller Jordan's Muon post: https://kellerjordan.github.io/posts/muon/
-# github permlink: https://github.com/KellerJordan/Muon/blob/f90a42b28e00b8d9d2d05865fe90d9f39abcbcbd/muon.py#L16
-EPS = 1e-7
-DEFAULT_A = 3.4445
-DEFAULT_B = -4.7750
-DEFAULT_C = 2.0315
-DEFAULT_NS_STEPS = 5
-
-
-def _zeropower_via_newtonschulz(
-    grad: Tensor, ns_coefficients: tuple[float, float, float], ns_steps: int, eps: float
-) -> Tensor:
-    """
-    Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
-    quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
-    of minimizing steps, it turns out to be empirically effective to keep increasing the slope at
-    zero even beyond the point where the iteration no longer converges all the way to one everywhere
-    on the interval. This iteration therefore does not produce UV^T but rather something like US'V^T
-    where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt model
-    performance at all relative to UV^T, where USV^T = G is the SVD.
-
-    Implementation reference: https://github.com/KellerJordan/Muon/blob/master/muon.py
-    with suggestions by @jxbz, @leloykun, and @YouJiacheng.
-    """
-    if ns_steps >= 100:
-        raise ValueError(
-            "Number of steps must be less than 100 for computational efficiency"
-        )
-    if len(grad.shape) != 2:
-        raise ValueError("Input tensor gradient must be a 2D matrix")
-    if len(ns_coefficients) != 3:
-        raise ValueError("Coefficients must be a tuple of exactly 3 values")
-    a, b, c = ns_coefficients
-    ortho_grad = grad.bfloat16()
-    if grad.size(0) > grad.size(1):
-        ortho_grad = ortho_grad.T
-    # Ensure spectral norm is at most 1
-    ortho_grad.div_(ortho_grad.norm().clamp(min=eps))
-    # Perform the NS iterations
-    for _ in range(ns_steps):
-        gram_matrix = ortho_grad @ ortho_grad.T
-        gram_update = torch.addmm(
-            gram_matrix, gram_matrix, gram_matrix, beta=b, alpha=c
-        )
-        ortho_grad = torch.addmm(ortho_grad, gram_update, ortho_grad, beta=a)
-
-    if grad.size(0) > grad.size(1):
-        ortho_grad = ortho_grad.T
-    return ortho_grad
-
-
-def _adjust_lr(
-    lr: float, adjust_lr_fn: Optional[str], param_shape: torch.Size
-) -> float:
-    """Default learning rate adjustment used by Muon."""
-    A, B = param_shape[:2]
-
-    if adjust_lr_fn is None or adjust_lr_fn == "original":
-        # pyrefly: ignore [no-matching-overload]
-        adjusted_ratio = math.sqrt(max(1, A / B))
-    elif adjust_lr_fn == "match_rms_adamw":
-        adjusted_ratio = 0.2 * math.sqrt(max(A, B))
-    else:
-        adjusted_ratio = 1.0
-    return lr * adjusted_ratio
-
-
-class Muon(Optimizer):
-    def __init__(
-        self,
-        params: ParamsT,
-        lr: float = 1e-3,
-        weight_decay: float = 0.1,
-        momentum: float = 0.95,
-        nesterov: bool = True,
-        ns_coefficients: tuple[float, float, float] = (DEFAULT_A, DEFAULT_B, DEFAULT_C),
-        eps: float = EPS,
-        ns_steps: int = DEFAULT_NS_STEPS,
-        adjust_lr_fn: Optional[str] = None,
-    ) -> None:
-        if isinstance(lr, Tensor) and lr.numel() != 1:
-            raise ValueError("Tensor lr must be 1-element")
-        if not 0.0 <= lr:
-            raise ValueError(f"Learning rate should be >= 0 but is: {lr}")
-        if not 0.0 <= momentum:
-            raise ValueError(f"momentum should be >= 0 but is: {momentum}")
-        if not 0.0 <= weight_decay:
-            raise ValueError(f"weight decay should be >= 0 but is: {weight_decay}")
-        if adjust_lr_fn is not None and adjust_lr_fn not in [
-            "original",
-            "match_rms_adamw",
-        ]:
-            raise ValueError(
-                f"Adjust learning rate function {adjust_lr_fn} is not supported"
-            )
-
-        defaults = {
-            "lr": lr,
-            "weight_decay": weight_decay,
-            "momentum": momentum,
-            "nesterov": nesterov,
-            "ns_coefficients": ns_coefficients,
-            "eps": eps,
-            "ns_steps": ns_steps,
-            "adjust_lr_fn": adjust_lr_fn,
-        }
+class Muon(torch.optim.Optimizer):
+    """Muon optimizer from airbench94"""
+    def __init__(self, params, lr=1e-3, momentum=0, nesterov=False):
+        if lr < 0.0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        if momentum < 0.0:
+            raise ValueError(f"Invalid momentum value: {momentum}")
+        if nesterov and momentum <= 0:
+            raise ValueError("Nesterov momentum requires a momentum")
+        defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov)
         super().__init__(params, defaults)
 
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.ndim != 2:
-                    raise ValueError(
-                        f"Muon only supports 2D parameters whereas we found a parameter with size: {p.size()}"
-                    )
-
-    def _init_group(
-        self,
-        group: MutableMapping,
-        params_with_grad: list[Tensor],
-        grads: list[Tensor],
-        muon_momentum_bufs: list[Tensor],
-    ) -> bool:
-        for p in group["params"]:
-            if p.grad is None:
-                continue
-
-            if torch.is_complex(p):
-                raise RuntimeError("Muon does not support complex parameters")
-            if p.grad.is_sparse:
-                raise RuntimeError("Muon does not support sparse gradients")
-
-            params_with_grad.append(p)
-            grads.append(p.grad)
-
-            state = self.state[p]
-
-            if "momentum_buffer" not in state:
-                state["momentum_buffer"] = torch.zeros_like(
-                    p.grad, memory_format=torch.preserve_format
-                )
-            muon_momentum_bufs.append(state["momentum_buffer"])
-
-        return False  # has_complex
-
-    @torch.no_grad()
-    def step(self, closure=None):
-        """Performs a single optimization step."""
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
-
+    def step(self):
         for group in self.param_groups:
             lr = group["lr"]
-            weight_decay = group["weight_decay"]
             momentum = group["momentum"]
+            for p in group["params"]:
+                g = p.grad
+                if g is None:
+                    continue
+                state = self.state[p]
 
-            params_with_grad: list[Tensor] = []
-            grads: list[Tensor] = []
-            muon_momentum_bufs: list[Tensor] = []
+                if "momentum_buffer" not in state.keys():
+                    state["momentum_buffer"] = torch.zeros_like(g)
+                buf = state["momentum_buffer"]
+                buf.mul_(momentum).add_(g)
+                g = g.add(buf, alpha=momentum) if group["nesterov"] else buf
 
-            has_complex = self._init_group(
-                group,
-                params_with_grad,
-                grads,
-                muon_momentum_bufs,
-            )
+                p.data.mul_(len(p.data)**0.5 / p.data.norm())
+                update = zeropower_via_newtonschulz5(g.reshape(len(g), -1)).view(g.shape)
+                p.data.add_(update, alpha=-lr)
 
-            muon(
-                params_with_grad,
-                grads,
-                muon_momentum_bufs,
-                lr=lr,
-                weight_decay=weight_decay,
-                momentum=momentum,
-                nesterov=group["nesterov"],
-                ns_coefficients=group["ns_coefficients"],
-                eps=group["eps"],
-                ns_steps=group["ns_steps"],
-                adjust_lr_fn=group["adjust_lr_fn"],
-                has_complex=has_complex,
-            )
-        return loss
+# PyTorch CIFAR10 Dataset
+class CIFAR10Dataset(Dataset):
+    def __init__(self, base_folder: str, train: bool):
+        self.base_folder = base_folder
+        self.train = train
+
+        if train:
+            files = [f"data_batch_{i}" for i in range(1, 5 + 1)]
+        else:
+            files = ["test_batch"]
+
+        imgs = []
+        labels = []
+
+        def _load_pickle(fp):
+            with open(fp, "rb") as f:
+                return pickle.load(f, encoding="latin1")
+
+        for fname in files:
+            path = os.path.join(base_folder, fname)
+            d = _load_pickle(path)
+            data = d.get("data", None)
+            if data is None:
+                data = d.get(b"data")
+            lbs = d.get("labels", None)
+            if lbs is None:
+                lbs = d.get(b"labels")
+
+            data = np.asarray(data, dtype=np.float32)
+            n = data.shape[0]
+            data = data.reshape(n, 3, 32, 32)
+            data = data / 255.0
+
+            imgs.append(data)
+            labels.append(np.asarray(lbs, dtype=np.int64))
+
+        self.X = np.concatenate(imgs, axis=0) if len(imgs) > 1 else imgs[0]
+        self.y = np.concatenate(labels, axis=0) if len(labels) > 1 else labels[0]
+
+    def __getitem__(self, index):
+        img_chw = self.X[index]
+        label = int(self.y[index])
+        img_tensor = torch.from_numpy(img_chw)
+        label_tensor = torch.tensor(label, dtype=torch.long)
+        return img_tensor, label_tensor
+
+    def __len__(self):
+        return self.X.shape[0]
 
 
-Muon.__doc__ = (
-    r"""Implements Muon algorithm.
+def train_model(model, dataloader, use_muon=False, muon_lr=0.1, muon_momentum=0.9, n_epochs=5):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
 
-    .. math::
-       \begin{aligned}
-            &\rule{110mm}{0.4pt} \\
-            &\textbf{input}      : \gamma \text{ (lr)},\ \lambda \text{ (weight decay)},\
-               \mu \text{ (momentum)},\ \textit{nesterov}\in\{True,False\},\\
-            &\hspace{13mm}(a,b,c)\ \text{ (NS coefficients)},\
-               \varepsilon \text{ (epsilon)},\ k \text{ (NS steps)},\
-               \theta_0 \text{ (params)},\ f(\theta) \text{ (objective)} \\
-            &\textbf{initialize} : B_0 \leftarrow 0 \text{ (momentum buffer)} \\[-1.ex]
-            &\rule{110mm}{0.4pt} \\
-            &\textbf{for}\ t=1\ \textbf{to}\ \ldots\ \textbf{do} \\[0.25ex]
-            &\hspace{5mm} g_t \leftarrow \nabla_{\theta} f_t(\theta_{t-1}) \\[0.25ex]
-            &\hspace{5mm} B_t \leftarrow \mu B_{t-1} + g_t \\[0.25ex]
-            &\hspace{5mm} \widetilde{B}_t \leftarrow
-                \begin{cases}
-                   g_t + \mu B_t, & \text{if nesterov}=True \\
-                   B_t,           & \text{if nesterov}=False
-                \end{cases} \\[1.0ex]
-            &\hspace{5mm} O_t \leftarrow \mathrm{NS}^{(a,b,c)}_{k}\!\big(\widetilde{B}_t;\ \varepsilon\big) \\[0.5ex]
-            &\hspace{5mm} \theta_t \leftarrow \theta_{t-1} - \gamma\,\lambda\,\theta_{t-1}
-               \quad\text{(decoupled weight decay)} \\[0.25ex]
+    if use_muon:
+        # airbench94 style: Muon for conv weights, SGD for everything else
+        conv_params = [p for p in model.parameters() if len(p.shape) == 4]
+        other_params = [p for p in model.parameters() if len(p.shape) != 4]
 
-            &\hspace{5mm} \gamma \leftarrow \mathrm{AdjustLR}\!\big(\gamma;\ \mathrm{shape}\!\big(\theta_t \big) \big) \\[0.25ex]
-            &\hspace{5mm} \theta_t \leftarrow \theta_t - \gamma\, O_t \\
-            &\rule{110mm}{0.4pt} \\[-1.ex]
-            &\mathbf{return}\ \theta_t \\[-1.ex]
-            &\rule{110mm}{0.4pt}s
-       \end{aligned}
+        opt_muon = Muon(conv_params, lr=muon_lr, momentum=muon_momentum, nesterov=True)
+        opt_sgd = torch.optim.SGD(other_params, lr=0.1, momentum=0.85, nesterov=True)
+        optimizers = [opt_muon, opt_sgd]
+        opt_name = f"Muon+SGD (lr={muon_lr}, m={muon_momentum})"
+    else:
+        optimizers = [torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=0.0001)]
+        opt_name = "Adam"
 
-    Here, :math:`\mathrm{NS}^{(a,b,c)}_{k}(\cdot;\varepsilon)` denotes :math:`k` iterations of the
-    Newton–Schulz orthogonalization operator parameterized by coefficients :math:`(a,b,c)`
-    with numerical stabilization :math:`\varepsilon`.
+    loss_fn = nn.CrossEntropyLoss()
 
-    The purpose for :math:`\mathrm{AdjustLR}\!\big(\gamma;\ \mathrm{shape}\!\big(\theta_t \big) \big)`
-    is to make the orthogonalized update have a consistent :math:`RMS` across rectangular matrices.
+    start_time = time.time()
+    final_acc = 0.0
 
-    Keller's original implementation scales the update by :math:`\sqrt{\max\!\left(1, \frac{A}{B}\right)}`,
-    where :math:`A` and :math:`B` are dimension of the matrix being optimized.
+    for epoch in range(n_epochs):
+        model.train()
+        train_loss = 0.0
+        train_correct = 0
+        train_total = 0
 
-    Moonshot's implementation also focuses on matching :math:`RMS` of AdamW. The adjustment is computed as:
-    :math:`\gamma \leftarrow {0.2}\gamma\,\sqrt{\max\!\left({A}, {B}\right)}`
-    The method is adopted from `Muon is Scalable for LLM Training`_. Research
-    results show that with this adjustment Muon can directly reuse the learning rate
-    and weight decay tuned for AdamW.
+        for X, y in dataloader:
+            X, y = X.to(device), y.to(device)
 
-    We provide two options for the learning rate adjustment: "original", which follows Keller's
-    implementation, and "match_rms_adamw", which refers to Moonshot's implementation. This gives users the
-    flexibility to choose between the two. If `adjust_lr_fn` is not specified, the default is "original".
+            for opt in optimizers:
+                opt.zero_grad()
 
-    For further details regarding the algorithm we refer to `Muon: An optimizer for hidden layers in neural networks`_
-    and `Muon is Scalable for LLM Training`_.
-    """
-    + rf"""
-    Args:
-        {_params_doc}. Note that Muon is an optimizer for 2D parameters of neural network hidden layers. Other
-            parameters, such as bias, and embedding, should be optimized by a standard method such as AdamW.
-        lr (float, Tensor, optional): learning rate (default: 1e-3).
-        weight_decay (float, optional): weight decay (L2 penalty). (default: 0.1)
-        momentum (float, optional): momentum factor (default: 0.95)
-        nesterov (bool, optional): enables Nesterov momentum. Only applicable
-            when momentum is non-zero
-        ns_coefficients (tuple of three floats, optional): coefficients \(a,b,c\) for the
-            Newton–Schulz orthogonalization polynomial (default: ({DEFAULT_A}, {DEFAULT_B}, {DEFAULT_C}))
-        eps (float, optional): term added to the denominator for numerical stability. (default: {EPS})
-        ns_steps (int, optional): number of Newton–Schulz iteration steps. (default: {DEFAULT_NS_STEPS})
-        adjust_lr_fn (str, optional): function to adjust learning rate. One of "original" and "match_rms_adamw".
-            If not specified, we will default to use "original". (default: None)
+            logits = model(X)
+            loss = loss_fn(logits, y)
+            loss.backward()
 
-    .. _Muon\: An optimizer for hidden layers in neural networks:
-        https://kellerjordan.github.io/posts/muon/
-    .. _Muon is Scalable for LLM Training:
-        https://arxiv.org/pdf/2502.16982
+            for opt in optimizers:
+                opt.step()
 
-    """
+            train_loss += loss.item() * y.shape[0]
+            train_correct += (logits.argmax(1) == y).sum().item()
+            train_total += y.shape[0]
+
+        train_loss /= train_total
+        train_acc = train_correct / train_total
+        final_acc = train_acc
+
+        if n_epochs <= 5:  # Only print for grid search
+            print(f"  Epoch {epoch}: acc={train_acc:.4f}")
+        else:  # Full training
+            print(f"Epoch {epoch:02d} | train_acc={train_acc:.4f}, train_loss={train_loss:.4f}")
+
+    elapsed = time.time() - start_time
+    if n_epochs > 5:
+        print(f"Total time: {elapsed:.2f}s\n")
+
+    return final_acc
+
+# ResNet9
+class ResNet9(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(3, 16, kernel_size=7, stride=4, padding=3),
+            nn.BatchNorm2d(16),
+            nn.ReLU()
+        )
+
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU()
+        )
+
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU()
+        )
+
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(32, 32, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU()
+        )
+
+        self.conv5 = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU()
+        )
+
+        self.conv6 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU()
+        )
+
+        self.conv7 = nn.Sequential(
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU()
+        )
+
+        self.conv8 = nn.Sequential(
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU()
+        )
+
+        self.fc1 = nn.Linear(128, 128)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(128, 10)
+
+    def forward(self, x):
+        x = self.conv1(x)
+        out2 = self.conv2(x)
+
+        x = self.conv3(out2)
+        x = self.conv4(x)
+        x = x + out2
+
+        x = self.conv5(x)
+        out6 = self.conv6(x)
+
+        x = self.conv7(out6)
+        x = self.conv8(x)
+
+        x_flat = x.reshape(x.shape[0], -1)
+        out6_flat = out6.reshape(out6.shape[0], -1)
+        x = x_flat + out6_flat
+
+        x = self.fc1(x)
+        x = self.relu(x)
+        x = self.fc2(x)
+        return x
+
+# Load dataloader with larger batch size
+print("Loading CIFAR10...")
+dataset = CIFAR10Dataset("data/cifar-10-batches-py", train=True)
+dataloader = DataLoader(
+    dataset=dataset,
+    batch_size=512,  # Larger batch size for Muon
+    shuffle=True,
 )
 
+# Train Adam baseline
+print("="*70)
+print("TRAINING WITH ADAM (baseline)")
+print("="*70)
+model_adam = ResNet9().cuda()
+train_model(model_adam, dataloader, use_muon=False, n_epochs=10)
 
-def _single_tensor_muon(
-    params: list[Tensor],
-    grads: list[Tensor],
-    muon_momentum_bufs: list[Tensor],
-    *,
-    lr: float,
-    weight_decay: float,
-    momentum: float,
-    nesterov: bool,
-    ns_coefficients: tuple[float, float, float],
-    ns_steps: int,
-    eps: float,
-    adjust_lr_fn: Optional[str],
-    has_complex: bool,
-) -> None:
-    lr = _to_scalar(lr)
-    if has_complex:
-        raise ValueError("Complex parameters are not supported")
+# Grid search for Muon hyperparameters
+print("="*70)
+print("GRID SEARCH: Testing different Muon hyperparameters (batch_size=512)")
+print("="*70)
 
-    for i, param in enumerate(params):
-        grad = grads[i]
-        if grad.ndim != 2:
-            raise ValueError("Param gradient must be a 2D matrix")
+muon_lrs = [0.05, 0.1, 0.15, 0.2, 0.25]  # Higher LRs for larger batch size
+muon_momentums = [0.85, 0.9, 0.95]  # Higher momentums
+results = {}
 
-        buf = muon_momentum_bufs[i]
-        buf.lerp_(grad, 1 - momentum)
-        update = grad.lerp(buf, momentum) if nesterov else buf
+for lr in muon_lrs:
+    for momentum in muon_momentums:
+        print(f"\nTesting lr={lr}, momentum={momentum}")
+        model = ResNet9().cuda()
+        acc = train_model(model, dataloader, use_muon=True, muon_lr=lr, muon_momentum=momentum, n_epochs=5)
+        results[(lr, momentum)] = acc
 
-        update = _zeropower_via_newtonschulz(update, ns_coefficients, ns_steps, eps)
+# Print best result
+print("\n" + "="*70)
+print("GRID SEARCH RESULTS")
+print("="*70)
+for (lr, momentum), acc in sorted(results.items(), key=lambda x: x[1], reverse=True):
+    print(f"lr={lr:6.4f}, momentum={momentum:.2f} -> acc={acc:.4f}")
 
-        adjusted_lr = _adjust_lr(lr, adjust_lr_fn, param.shape)
+best_lr, best_momentum = max(results.items(), key=lambda x: x[1])[0]
+print(f"\nBest: lr={best_lr}, momentum={best_momentum}")
 
-        param.mul_(1 - lr * weight_decay)
-        param.add_(update, alpha=-adjusted_lr)
+# Train with best hyperparameters
+print("\n" + "="*70)
+print(f"TRAINING WITH BEST MUON (lr={best_lr}, momentum={best_momentum})")
+print("="*70)
+model_muon = ResNet9().cuda()
+train_model(model_muon, dataloader, use_muon=True, muon_lr=best_lr, muon_momentum=best_momentum, n_epochs=10)
 
-
-@_disable_dynamo_if_unsupported(single_tensor_fn=_single_tensor_muon)
-def muon(
-    params: list[Tensor],
-    grads: list[Tensor],
-    muon_momentum_bufs: list[Tensor],
-    *,
-    foreach: Optional[bool] = None,
-    lr: float,
-    weight_decay: float,
-    momentum: float,
-    nesterov: bool,
-    ns_coefficients: tuple[float, float, float],
-    ns_steps: int,
-    eps: float,
-    adjust_lr_fn: Optional[str],
-    has_complex: bool,
-) -> None:
-    r"""Functional API that performs Muon algorithm computation.
-
-    See :class:`~torch.optim.Muon` for details.
-    """
-    if foreach is not None and foreach:
-        raise RuntimeError("Foreach is not supported for Muon yet")
-
-    func = _single_tensor_muon
-
-    func(
-        params,
-        grads,
-        muon_momentum_bufs,
-        lr=lr,
-        weight_decay=weight_decay,
-        momentum=momentum,
-        nesterov=nesterov,
-        ns_coefficients=ns_coefficients,
-        ns_steps=ns_steps,
-        eps=eps,
-        adjust_lr_fn=adjust_lr_fn,
-        has_complex=has_complex,
-    )
+print("Done!")
