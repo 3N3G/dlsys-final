@@ -79,8 +79,12 @@ class CIFAR10Dataset(Dataset):
             path = os.path.join(base_folder, fname)
             with open(path, "rb") as f:
                 d = pickle.load(f, encoding="latin1")
-            data = d.get("data") or d.get(b"data")
-            lbs = d.get("labels") or d.get(b"labels")
+            data = d.get("data", None)
+            if data is None:
+                data = d.get(b"data")
+            lbs = d.get("labels", None)
+            if lbs is None:
+                lbs = d.get(b"labels")
 
             data = np.asarray(data, dtype=np.float32)
             data = data.reshape(-1, 3, 32, 32) / 255.0
