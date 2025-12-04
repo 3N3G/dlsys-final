@@ -91,7 +91,7 @@ def nn_epoch(X, y, W1, W2, lr=0.1, batch=100):
     ### END YOUR SOLUTION
 
 ### CIFAR-10 training ###
-def epoch_general_cifar10(dataloader, model, loss_fn=nn.SoftmaxLoss(), opt=None):
+def epoch_general_cifar10(dataloader, model, loss_fn=nn.SoftmaxLoss(), opt=None, batches=None):
     """
     Iterates over the dataloader. If optimizer is not None, sets the
     model to train mode, and for each batch updates the model parameters.
@@ -125,7 +125,9 @@ def epoch_general_cifar10(dataloader, model, loss_fn=nn.SoftmaxLoss(), opt=None)
     total_correct = 0
     total_examples = 0
 
-    for X, y in dataloader:
+    for i, (X, y) in enumerate(dataloader):
+        if batches is not None and i >= batches:
+            break
         X = ndl.Tensor(X.numpy(), device=model.device, dtype="float32")
         y = ndl.Tensor(y.numpy(), device=model.device, dtype="float32")
         
@@ -172,7 +174,7 @@ def epoch_general_cifar10(dataloader, model, loss_fn=nn.SoftmaxLoss(), opt=None)
 
 
 def train_cifar10(model, dataloader, n_epochs=1, optimizer=ndl.optim.Adam,
-          lr=0.001, weight_decay=0.001, loss_fn=nn.SoftmaxLoss):
+          lr=0.001, weight_decay=0.001, loss_fn=nn.SoftmaxLoss, batches=None):
     """
     Performs {n_epochs} epochs of training.
 
@@ -196,9 +198,9 @@ def train_cifar10(model, dataloader, n_epochs=1, optimizer=ndl.optim.Adam,
     loss_module = loss_fn()
 
     last_acc, last_loss = 0.0, 0.0
-    for epoch in range(n_epochs):
+    for epoch in tqdm(range(n_epochs)):
         last_acc, last_loss = epoch_general_cifar10(
-            dataloader, model, loss_fn=loss_module, opt=opt
+            dataloader, model, loss_fn=loss_module, opt=opt, batches=batches
         )
         test_acc, test_loss = evaluate_cifar10(model, dataloader)
         print(
@@ -238,7 +240,7 @@ def evaluate_cifar10(model, dataloader, loss_fn=nn.SoftmaxLoss):
 
 ### PTB training ###
 def epoch_general_ptb(data, model, seq_len=40, loss_fn=nn.SoftmaxLoss(), opt=None,
-        clip=None, device=None, dtype="float32"):
+        clip=None, device=None, dtype="float32", batches=None):
     """
     Iterates over the data. If optimizer is not None, sets the
     model to train mode, and for each batch updates the model parameters.
@@ -270,6 +272,8 @@ def epoch_general_ptb(data, model, seq_len=40, loss_fn=nn.SoftmaxLoss(), opt=Non
 
     # We restart hidden state for each epoch (no carry across BPTT segments)
     for i in range(0, nbatch - 1, seq_len):
+        if batches is not None and (i // seq_len) >= batches:
+            break
         # x: (seq_len', bs), y: (seq_len'*bs,)
         x, y = ndl.data.datasets.get_batch(data, i, seq_len, device=device, dtype=dtype)
 
@@ -329,7 +333,7 @@ def epoch_general_ptb(data, model, seq_len=40, loss_fn=nn.SoftmaxLoss(), opt=Non
 
 def train_ptb(model, data, seq_len=40, n_epochs=1, optimizer=ndl.optim.SGD,
           lr=4.0, weight_decay=0.0, loss_fn=nn.SoftmaxLoss, clip=None,
-          device=None, dtype="float32"):
+          device=None, dtype="float32", batches=None):
     """
     Performs {n_epochs} epochs of training.
 
@@ -364,6 +368,7 @@ def train_ptb(model, data, seq_len=40, n_epochs=1, optimizer=ndl.optim.SGD,
             clip=clip,
             device=device,
             dtype=dtype,
+            batches=batches
         )
 
     return last_acc, last_loss
