@@ -171,6 +171,7 @@ class Muon(Optimizer):
         ns_steps=5,
         eps=1e-7,
         weight_decay=0,
+        total_steps=None,
     ):
         super().__init__(params)
         self.muon_lr = muon_lr
@@ -179,10 +180,28 @@ class Muon(Optimizer):
         self.nesterov = nesterov
         self.ns_steps = ns_steps  # Newton-Schulz iteration steps
         self.eps = eps
+
+        self.total_steps = total_steps
+
         self.t = 0
 
         # Momentum buffer
         self.m = {}
+
+    def _current_lrs(self):
+        """
+        Compute current muon_lr and sgd_lr according to linear decay:
+            lr_t = lr_0 * (1 - t / total_steps)
+        If total_steps is None or <= 0, use constant LRs.
+        """
+        if self.total_steps is None or self.total_steps <= 0:
+            return self.muon_lr, self.sgd_lr
+
+        # self.t is incremented at the start of step(); mirror CifarNet "step" usage
+        decay = max(0.0, 1.0 - self.t / float(self.total_steps))
+        cur_muon_lr = self.muon_lr * decay
+        cur_sgd_lr = self.sgd_lr * decay
+        return cur_muon_lr, cur_sgd_lr
 
     def _zeropower_via_newtonschulz5(self, G):
         """
@@ -231,6 +250,8 @@ class Muon(Optimizer):
 
     def step(self):
         self.t += 1
+        
+        cur_muon_lr, cur_sgd_lr = self._current_lrs()
 
         for p in self.params:
             if p.grad is None:
@@ -271,10 +292,10 @@ class Muon(Optimizer):
                 G2d_orth = self._zeropower_via_newtonschulz5(G2d)
                 update = G2d_orth.reshape(w.shape)
 
-                new_w = w - self.muon_lr * update
+                new_w = w - cur_muon_lr * update
             else:
                 # For 1D parameters (biases), just do standard update
-                new_w = w - self.sgd_lr * update_grad
+                new_w = w - cur_sgd_lr * update_grad
 
             # Write back to parameter
             p.data = type(p)(new_w, dtype=p.dtype, device=p.device)
@@ -368,20 +389,21 @@ class Muon(Optimizer):
 
 class SOAP(Optimizer):
     """
-    SOAP-like optimizer (Shampoo / Adafactor style) for Needle.
+    SOAP-like optimizer (factored second moment, Adam-style first moment).
 
-    Design:
-    - Adam-like first-moment (m) tracking
-    - Factored second-moment statistics for matrix-shaped parameters:
-        * row_v: per-row squared-grad averages
-        * col_v: per-column squared-grad averages
-      inspired by Shampoo/Adafactor.
-    - For non-matrix params (biases, LayerNorm weights, etc.), falls back
-      to standard Adam-style v.
+    Conceptual behavior:
+    - For 2D parameters (weight matrices), maintain factored second-moment
+      statistics (per-row and per-column) like Adafactor:
+        * row_v[p]: shape (out_dim,)
+        * col_v[p]: shape (in_dim,)
+      and approximate per-element second moment via outer-product-style
+      row/col RMS.
+    - For non-2D parameters (biases, LN weights, conv kernels if 4D),
+      fall back to standard Adam-style diagonal second moment v[p].
 
-    This is not the full SOAP (which runs Adam in the eigenbasis of a
-    Shampoo preconditioner), but it captures the big idea: use structured
-    second-order information along rows/cols instead of purely diagonal v.
+    This is not full SOAP (which would run Adam in the eigenbasis of a
+    Shampoo preconditioner), but a memory-efficient Adam variant inspired
+    by Adafactor / Shampoo / SOAP ideas.
     """
     def __init__(
         self,
@@ -402,7 +424,7 @@ class SOAP(Optimizer):
 
         # First moment
         self.m = {}
-        # Diagonal second moment fallback
+        # Diagonal second moment fallback (Adam-style)
         self.v = {}
         # Factored second moments for matrix-shaped params
         self.row_v = {}
@@ -415,38 +437,47 @@ class SOAP(Optimizer):
             if p.grad is None:
                 continue
 
-            grad = p.grad.data + self.weight_decay * p.data
+            # Get gradient as NDArray
+            g = p.grad.data
 
-            # Initialize buffers
+            # L2-style weight decay (classic, not decoupled AdamW)
+            if self.weight_decay != 0.0:
+                g = g + self.weight_decay * p.data
+
+            # Initialize first moment
             if p not in self.m:
-                self.m[p] = 0 * grad
-            if p not in self.v:
-                self.v[p] = 0 * grad
+                self.m[p] = 0 * g
 
             m_prev = self.m[p]
-            # First moment update
-            m = self.beta1 * m_prev + (1.0 - self.beta1) * grad
-
+            # First moment update (Adam)
+            m = self.beta1 * m_prev + (1.0 - self.beta1) * g
             # Bias correction for m
             m_hat = m / (1.0 - self.beta1 ** self.t)
 
-            # Matrix-shaped parameters: use factored second moments
-            shape = grad.shape
+            shape = g.shape
+
+            # -------------------------
+            # 2D parameters: factored stats (Adafactor-like)
+            # -------------------------
             if len(shape) == 2:
                 out_dim, in_dim = shape
 
                 # Lazy init for row/col stats
                 if p not in self.row_v:
-                    # zeros with correct shapes
-                    self.row_v[p] = (grad.sum(axes=1) * 0)  # (out_dim,)
-                    self.col_v[p] = (grad.sum(axes=0) * 0)  # (in_dim,)
+                    # row_v[p] shape: (out_dim,)
+                    # col_v[p] shape: (in_dim,)
+                    # Use g**2 sums to get correct shapes, then zero them out.
+                    row_init = (g ** 2).sum(axes=1) * 0
+                    col_init = (g ** 2).sum(axes=0) * 0
+                    self.row_v[p] = row_init
+                    self.col_v[p] = col_init
 
-                g2 = grad ** 2
+                g2 = g ** 2
 
-                # Update factored second moments
                 row_v_prev = self.row_v[p]
                 col_v_prev = self.col_v[p]
 
+                # Exponential moving average of squared-grad row/col sums
                 row_v = self.beta2 * row_v_prev + (1.0 - self.beta2) * g2.sum(axes=1)
                 col_v = self.beta2 * col_v_prev + (1.0 - self.beta2) * g2.sum(axes=0)
 
@@ -457,42 +488,44 @@ class SOAP(Optimizer):
                 row_v_hat = row_v / (1.0 - self.beta2 ** self.t)
                 col_v_hat = col_v / (1.0 - self.beta2 ** self.t)
 
-                # Approximate per-element RMS with factored stats (Adafactor-style)
-                # row_rms ~ sqrt(row_v / in_dim), col_rms ~ sqrt(col_v / out_dim)
-                # Bias correction for factored stats
-                row_v_hat = row_v / (1.0 - self.beta2 ** self.t)
-                col_v_hat = col_v / (1.0 - self.beta2 ** self.t)
-
-                # Adafactor-style RMS
+                # Adafactor-style RMS per row/col
+                # (divide by dimension to approximate average per element)
                 row_rms = (row_v_hat / float(in_dim)) ** 0.5   # (out_dim,)
                 col_rms = (col_v_hat / float(out_dim)) ** 0.5  # (in_dim,)
 
-                # Reshape for broadcasting, then explicitly broadcast
+                # Reshape to enable broadcasting to full matrix shape
                 row_rms = row_rms.reshape((out_dim, 1))        # (out_dim, 1)
-                col_rms = col_rms.reshape((1, in_dim))        # (1, in_dim)
+                col_rms = col_rms.reshape((1, in_dim))         # (1, in_dim)
 
-                row_mat = row_rms.broadcast_to((out_dim, in_dim))  # (out_dim, in_dim)
-                col_mat = col_rms.broadcast_to((out_dim, in_dim))  # (out_dim, in_dim)
+                row_mat = row_rms.broadcast_to((out_dim, in_dim))
+                col_mat = col_rms.broadcast_to((out_dim, in_dim))
 
+                # Approximate per-element RMS
                 denom = row_mat * col_mat + self.eps           # (out_dim, in_dim)
 
-                # Preconditioned update
-                precond_grad = m_hat / denom                   # same shape as grad
-
-                # Preconditioned update (Adam in factored preconditioner's "shape")
+                # Preconditioned update (Adam-like in factored space)
                 precond_grad = m_hat / denom
 
+            # -------------------------
+            # Non-2D parameters: fallback to Adam-style diag v
+            # -------------------------
             else:
-                # Fallback: standard Adam diagonal v
+                if p not in self.v:
+                    self.v[p] = 0 * g
+
                 v_prev = self.v[p]
-                v = self.beta2 * v_prev + (1.0 - self.beta2) * (grad ** 2)
+                v = self.beta2 * v_prev + (1.0 - self.beta2) * (g ** 2)
                 self.v[p] = v
 
+                # Bias correction for v
                 v_hat = v / (1.0 - self.beta2 ** self.t)
+
                 precond_grad = m_hat / (v_hat ** 0.5 + self.eps)
 
-            # Apply update
+            # Parameter update
             new_data = p.data - self.lr * precond_grad
+
+            # Write back to Tensor's underlying data
             p.data = type(p)(new_data, dtype=p.dtype, device=p.device)
 
             # Store first moment
