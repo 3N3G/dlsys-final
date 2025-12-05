@@ -257,17 +257,24 @@ class Muon(Optimizer):
 
             # Only apply Newton-Schulz to 2D parameters (weights)
             # For biases and other 1D params, use the gradient as-is
-            if len(p.shape) == 2:
-                # Orthogonalize the gradient using Newton-Schulz
-                update_grad_2d = update_grad.reshape((p.shape[0], -1))
-                update_orthogonal = self._zeropower_via_newtonschulz5(update_grad_2d)
-                update_orthogonal = update_orthogonal.reshape(p.shape)
+            w = p.data
 
-                # Apply update (no weight normalization in PyTorch version!)
-                new_w = p.data - self.muon_lr * update_orthogonal
+            if len(p.shape) >= 2:
+                # Orthogonalize the gradient using Newton-Schulz
+                rows = p.shape[0]
+                w_norm = ((w ** 2).sum()) ** 0.5
+                w_norm_val = w_norm.numpy().item()
+                scale = (rows ** 0.5)*((w_norm_val + self.eps)**-1)
+                w = w * scale
+
+                G2d = update_grad.reshape((update_grad.shape[0], -1))
+                G2d_orth = self._zeropower_via_newtonschulz5(G2d)
+                update = G2d_orth.reshape(w.shape)
+
+                new_w = w - self.muon_lr * update
             else:
                 # For 1D parameters (biases), just do standard update
-                new_w = p.data - self.sgd_lr * update_grad
+                new_w = w - self.sgd_lr * update_grad
 
             # Write back to parameter
             p.data = type(p)(new_w, dtype=p.dtype, device=p.device)
