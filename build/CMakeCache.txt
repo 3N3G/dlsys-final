@@ -541,6 +541,8 @@ CUDA_CUDART_LIBRARY-ADVANCED:INTERNAL=1
 CUDA_CUDA_LIBRARY-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CUDA_GENERATED_OUTPUT_DIR
 CUDA_GENERATED_OUTPUT_DIR-ADVANCED:INTERNAL=1
+//Returned GPU architectures from detect_gpus tool
+CUDA_GPU_DETECT_OUTPUT:INTERNAL=7.5
 //ADVANCED property for variable: CUDA_HOST_COMPILATION_CPP
 CUDA_HOST_COMPILATION_CPP-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: CUDA_NVCC_EXECUTABLE
@@ -659,6 +661,10 @@ _Python_Interpreter_REASON_FAILURE:INTERNAL=
 _Python_LIBRARY_RELEASE:INTERNAL=/usr/lib/x86_64-linux-gnu/libpython3.12.so
 //NumPy reason failure
 _Python_NumPy_REASON_FAILURE:INTERNAL=
+//Result of TRY_COMPILE
+compile_result:INTERNAL=TRUE
 //Directories where pybind11 and possibly Python headers are located
 pybind11_INCLUDE_DIRS:INTERNAL=/usr/local/lib/python3.12/dist-packages/pybind11/include;/usr/include/python3.12
+//Result of try_run()
+run_result:INTERNAL=0
 

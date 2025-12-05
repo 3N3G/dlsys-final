@@ -13,6 +13,7 @@ set(CMAKE_MAKEFILE_DEPENDS
   "CMakeFiles/3.31.10/CMakeSystem.cmake"
   "CMakeFiles/ndarray_backend_cuda.dir/src/ndarray_backend_cuda_generated_ndarray_backend_cuda.cu.o.cmake.pre-gen"
   "CMakeFiles/ndarray_backend_cuda.dir/src/ndarray_backend_cuda_generated_ndarray_backend_cuda.cu.o.depend"
+  "detect_cuda_compute_capabilities.cpp"
   "/usr/local/lib/python3.12/dist-packages/cmake/data/share/cmake-3.31/Modules/CMakeCInformation.cmake"
   "/usr/local/lib/python3.12/dist-packages/cmake/data/share/cmake-3.31/Modules/CMakeCXXInformation.cmake"
   "/usr/local/lib/python3.12/dist-packages/cmake/data/share/cmake-3.31/Modules/CMakeCheckCompilerFlagCommonPatterns.cmake"

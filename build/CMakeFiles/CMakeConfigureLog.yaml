@@ -648,3 +648,44 @@ events:
         
       exitCode: 0
 ...
+
+---
+events:
+  -
+    kind: "try_run-v1"
+    backtrace:
+      - "/usr/local/lib/python3.12/dist-packages/cmake/data/share/cmake-3.31/Modules/FindCUDA/select_compute_arch.cmake:141 (try_run)"
+      - "/usr/local/lib/python3.12/dist-packages/cmake/data/share/cmake-3.31/Modules/FindCUDA/select_compute_arch.cmake:197 (CUDA_DETECT_INSTALLED_GPUS)"
+      - "CMakeLists.txt:66 (CUDA_SELECT_NVCC_ARCH_FLAGS)"
+    directories:
+      source: "/content/drive/MyDrive/10714/proj/build/CMakeFiles/CMakeScratch/TryCompile-jE9oeb"
+      binary: "/content/drive/MyDrive/10714/proj/build/CMakeFiles/CMakeScratch/TryCompile-jE9oeb"
+    cmakeVariables:
+      CMAKE_CXX_FLAGS: "-std=c++11 -O2 -march=native "
+      CMAKE_EXE_LINKER_FLAGS: ""
+    buildResult:
+      variable: "compile_result"
+      cached: true
+      stdout: |
+        Change Dir: '/content/drive/MyDrive/10714/proj/build/CMakeFiles/CMakeScratch/TryCompile-jE9oeb'
+        
+        Run Build Command(s): /usr/local/lib/python3.12/dist-packages/cmake/data/bin/cmake -E env VERBOSE=1 /usr/bin/gmake -f Makefile cmTC_68054/fast
+        gmake[1]: Entering directory '/content/drive/MyDrive/10714/proj/build/CMakeFiles/CMakeScratch/TryCompile-jE9oeb'
+        /usr/bin/gmake  -f CMakeFiles/cmTC_68054.dir/build.make CMakeFiles/cmTC_68054.dir/build
+        gmake[2]: Entering directory '/content/drive/MyDrive/10714/proj/build/CMakeFiles/CMakeScratch/TryCompile-jE9oeb'
+        Building CXX object CMakeFiles/cmTC_68054.dir/detect_cuda_compute_capabilities.cpp.o
+        /usr/bin/c++  -I/usr/local/cuda/include -std=c++11 -O2 -march=native   -o CMakeFiles/cmTC_68054.dir/detect_cuda_compute_capabilities.cpp.o -c /content/drive/MyDrive/10714/proj/build/detect_cuda_compute_capabilities.cpp
+        Linking CXX executable cmTC_68054
+        /usr/local/lib/python3.12/dist-packages/cmake/data/bin/cmake -E cmake_link_script CMakeFiles/cmTC_68054.dir/link.txt --verbose=1
+        /usr/bin/c++ -std=c++11 -O2 -march=native   CMakeFiles/cmTC_68054.dir/detect_cuda_compute_capabilities.cpp.o -o cmTC_68054  /usr/local/cuda/lib64/libcudart_static.a -ldl /usr/lib/x86_64-linux-gnu/librt.a
+        gmake[2]: Leaving directory '/content/drive/MyDrive/10714/proj/build/CMakeFiles/CMakeScratch/TryCompile-jE9oeb'
+        gmake[1]: Leaving directory '/content/drive/MyDrive/10714/proj/build/CMakeFiles/CMakeScratch/TryCompile-jE9oeb'
+        
+      exitCode: 0
+    runResult:
+      variable: "run_result"
+      cached: true
+      stdout: |
+        7.5 
+      exitCode: 0
+...

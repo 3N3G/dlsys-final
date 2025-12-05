@@ -1,11 +1,4 @@
-# Ignore data folders
-/data/
-
-# Ignore secrets and configs
-.env
-secrets.json
-config.py
-
-# Ignore Python cache
 __pycache__/
 *.pyc
+.ipynb_checkpoints/
+data/
