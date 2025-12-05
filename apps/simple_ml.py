@@ -170,9 +170,16 @@ def epoch_general_cifar10(dataloader, model, loss_fn=nn.SoftmaxLoss(), opt=None)
     return avg_acc, avg_loss
     ### END YOUR SOLUTION
 
-
-def train_cifar10(model, dataloader, n_epochs=1, optimizer=ndl.optim.Adam,
-          lr=0.001, weight_decay=0.001, loss_fn=nn.SoftmaxLoss):
+def train_cifar10(
+    model,
+    dataloader,
+    n_epochs=1,
+    optimizer=ndl.optim.Adam,
+    lr=0.001,
+    weight_decay=0.001,
+    optimizer_kwargs=None,
+    loss_fn=nn.SoftmaxLoss,
+):
     """
     Performs {n_epochs} epochs of training.
 
@@ -181,8 +188,12 @@ def train_cifar10(model, dataloader, n_epochs=1, optimizer=ndl.optim.Adam,
         model: nn.Module instance
         n_epochs: number of epochs (int)
         optimizer: Optimizer class
-        lr: learning rate (float)
+        lr: learning rate (float) - used for optimizers that accept `lr`
         weight_decay: weight decay (float)
+        optimizer_kwargs: optional dict of extra keyword arguments passed to
+            the optimizer constructor. This is where you can pass things like
+            muon_lr, sgd_lr, momentum, etc. If None, defaults to
+            {"lr": lr, "weight_decay": weight_decay}.
         loss_fn: nn.Module class
 
     Returns:
@@ -190,9 +201,18 @@ def train_cifar10(model, dataloader, n_epochs=1, optimizer=ndl.optim.Adam,
         avg_loss: average loss over dataset from last epoch of training
     """
     np.random.seed(4)
-    ### BEGIN YOUR SOLUTION
+
+    # Build optimizer kwargs
+    if optimizer_kwargs is None:
+        optimizer_kwargs = {"lr": lr, "weight_decay": weight_decay}
+    else:
+        # copy so we don't mutate caller's dict
+        optimizer_kwargs = dict(optimizer_kwargs)
+        # supply a default weight_decay if caller didn't override
+        optimizer_kwargs.setdefault("weight_decay", weight_decay)
+
     # Instantiate optimizer and loss module
-    opt = optimizer(model.parameters(), lr=lr, weight_decay=weight_decay)
+    opt = optimizer(model.parameters(), **optimizer_kwargs)
     loss_module = loss_fn()
 
     last_acc, last_loss = 0.0, 0.0
@@ -206,10 +226,49 @@ def train_cifar10(model, dataloader, n_epochs=1, optimizer=ndl.optim.Adam,
             f"train_acc={last_acc:.4f}, train_loss={last_loss:.4f} | "
             f"test_acc={test_acc:.4f}, test_loss={test_loss:.4f}"
         )
-        # print("ACCURACY ", last_acc, "LOSS ", last_loss)
-        
+
     return last_acc, last_loss
-    ### END YOUR SOLUTION
+
+
+# def train_cifar10(model, dataloader, n_epochs=1, optimizer=ndl.optim.Adam,
+#           lr=0.001, weight_decay=0.001, loss_fn=nn.SoftmaxLoss):
+#     """
+#     Performs {n_epochs} epochs of training.
+
+#     Args:
+#         dataloader: Dataloader instance
+#         model: nn.Module instance
+#         n_epochs: number of epochs (int)
+#         optimizer: Optimizer class
+#         lr: learning rate (float)
+#         weight_decay: weight decay (float)
+#         loss_fn: nn.Module class
+
+#     Returns:
+#         avg_acc: average accuracy over dataset from last epoch of training
+#         avg_loss: average loss over dataset from last epoch of training
+#     """
+#     np.random.seed(4)
+#     ### BEGIN YOUR SOLUTION
+#     # Instantiate optimizer and loss module
+#     opt = optimizer(model.parameters(), lr=lr, weight_decay=weight_decay)
+#     loss_module = loss_fn()
+
+#     last_acc, last_loss = 0.0, 0.0
+#     for epoch in range(n_epochs):
+#         last_acc, last_loss = epoch_general_cifar10(
+#             dataloader, model, loss_fn=loss_module, opt=opt
+#         )
+#         test_acc, test_loss = evaluate_cifar10(model, dataloader)
+#         print(
+#             f"Epoch {epoch:02d} | "
+#             f"train_acc={last_acc:.4f}, train_loss={last_loss:.4f} | "
+#             f"test_acc={test_acc:.4f}, test_loss={test_loss:.4f}"
+#         )
+#         # print("ACCURACY ", last_acc, "LOSS ", last_loss)
+        
+#     return last_acc, last_loss
+#     ### END YOUR SOLUTION
 
 
 def evaluate_cifar10(model, dataloader, loss_fn=nn.SoftmaxLoss):

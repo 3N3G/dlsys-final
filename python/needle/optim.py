@@ -164,7 +164,8 @@ class Muon(Optimizer):
     def __init__(
         self,
         params,
-        lr=0.02,
+        muon_lr=0.1,
+        sgd_lr=0.001,
         momentum=0.95,
         nesterov=False,
         ns_steps=5,
@@ -172,7 +173,8 @@ class Muon(Optimizer):
         weight_decay=0,
     ):
         super().__init__(params)
-        self.lr = lr
+        self.muon_lr = muon_lr
+        self.sgd_lr = sgd_lr
         self.momentum = momentum
         self.nesterov = nesterov
         self.ns_steps = ns_steps  # Newton-Schulz iteration steps
@@ -262,10 +264,10 @@ class Muon(Optimizer):
                 update_orthogonal = update_orthogonal.reshape(p.shape)
 
                 # Apply update (no weight normalization in PyTorch version!)
-                new_w = p.data - self.lr * update_orthogonal
+                new_w = p.data - self.muon_lr * update_orthogonal
             else:
                 # For 1D parameters (biases), just do standard update
-                new_w = p.data - self.lr * update_grad
+                new_w = p.data - self.sgd_lr * update_grad
 
             # Write back to parameter
             p.data = type(p)(new_w, dtype=p.dtype, device=p.device)
