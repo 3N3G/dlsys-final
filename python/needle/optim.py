@@ -303,7 +303,312 @@ class Muon(Optimizer):
             # Store momentum (must store .data to prevent gradient accumulation)
             self.m[p] = buf.data
 
+class SOAP(Optimizer):
+    """
+    SOAP optimizer: Shampoo + Adam in the preconditioner's eigenbasis,
+    ported to Needle.
 
+    This is a simplified port of the PyTorch implementation you pasted.
+
+    - Maintains:
+        * exp_avg: first moment (Adam)
+        * exp_avg_sq: second moment (Adam)
+        * GG[p]: list of preconditioner matrices (one per dimension)
+        * Q[p]:   list of eigenbases for GG[p]
+    - For each param p:
+        1. Project grad into the Shampoo eigenbasis (via Q).
+        2. Run Adam in that basis.
+        3. Project the preconditioned update back.
+        4. Apply decoupled weight decay.
+
+    Implementation notes:
+    - All preconditioner math (GG, Q, eigendecomp, tensordot) is done in NumPy.
+    - Works best with relatively small layers (CIFAR/ResNet9 level).
+    - We ignore `merge_dims` / `channels_last` tricks for now and assume
+      `merge_dims=False`, `data_format="channels_first"`.
+    """
+
+    def __init__(
+        self,
+        params,
+        lr: float = 3e-3,
+        betas=(0.95, 0.95),
+        shampoo_beta: float = -1,
+        eps: float = 1e-8,
+        weight_decay: float = 0.01,
+        precondition_frequency: int = 10,
+        max_precond_dim: int = 10000,
+        merge_dims: bool = False,
+        precondition_1d: bool = False,
+        normalize_grads: bool = False,
+        data_format: str = "channels_first",
+        correct_bias: bool = True,
+    ):
+        super().__init__(params)
+        self.lr = lr
+        self.beta1, self.beta2 = betas
+        # If shampoo_beta < 0, fall back to beta2 (same as PyTorch code)
+        self.shampoo_beta = shampoo_beta if shampoo_beta >= 0 else self.beta2
+        self.eps = eps
+        self.weight_decay = weight_decay
+        self.precondition_frequency = precondition_frequency
+        self.max_precond_dim = max_precond_dim
+        self.merge_dims = merge_dims
+        self.precondition_1d = precondition_1d
+        self.normalize_grads = normalize_grads
+        self.data_format = data_format
+        self.correct_bias = correct_bias
+
+        if self.merge_dims:
+            # You can remove this assert and port the full merge_dims logic if you like.
+            raise NotImplementedError("merge_dims=True not yet supported in Needle SOAP.")
+
+        # Per-parameter state (all in NumPy space)
+        self.step_count = {}   # p -> int
+        self.exp_avg = {}      # p -> np.ndarray
+        self.exp_avg_sq = {}   # p -> np.ndarray
+        self.GG = {}           # p -> list of np.ndarray or [] for skipped dims
+        self.Q = {}            # p -> list of np.ndarray or [] for skipped dims
+
+    # ---------- small helpers working in NumPy space ----------
+
+    def _to_numpy(self, tensor):
+        """Tensor -> numpy.ndarray (detach)."""
+        return tensor.numpy()
+
+    def _from_numpy(self, arr, like_tensor):
+        """numpy.ndarray -> Tensor with same dtype/device as like_tensor."""
+        return ndl.Tensor(
+            arr,
+            device=like_tensor.device,
+            dtype=like_tensor.dtype,
+            requires_grad=False,
+        )
+
+    # ---------- Shampoo-style preconditioner initialization ----------
+
+    def _init_preconditioner(self, grad_np, p):
+        """
+        Initialize GG[p] and Q[p] given a gradient ndarray grad_np.
+        Mirrors the PyTorch init_preconditioner logic (simplified).
+        """
+        GG_list = []
+        if grad_np.ndim == 1:
+            # 1D parameters (e.g., bias, LN weights)
+            if not self.precondition_1d or grad_np.shape[0] > self.max_precond_dim:
+                GG_list.append([])  # no preconditioner for this param
+            else:
+                d = grad_np.shape[0]
+                GG_list.append(np.zeros((d, d), dtype=grad_np.dtype))
+        else:
+            # Multi-dimensional parameters: one GG matrix per dimension
+            for sh in grad_np.shape:
+                if sh > self.max_precond_dim:
+                    GG_list.append([])
+                else:
+                    GG_list.append(np.zeros((sh, sh), dtype=grad_np.dtype))
+
+        self.GG[p] = GG_list
+        self.Q[p] = None  # will be filled by eigenbases later
+
+    # ---------- eigenbasis computation ----------
+
+    def _compute_eigenbases(self, p):
+        """
+        Compute eigenbases Q[p] for each GG[p][k] via np.linalg.eigh.
+        """
+        GG_list = self.GG[p]
+        Q_list = []
+        for m in GG_list:
+            if isinstance(m, list) or (isinstance(m, np.ndarray) and m.size == 0):
+                # empty / skipped preconditioner
+                Q_list.append([])
+                continue
+            if m.shape[0] == 0:
+                Q_list.append([])
+                continue
+
+            # Add tiny jitter for numerical stability
+            eye = np.eye(m.shape[0], dtype=m.dtype)
+            try:
+                w, Q = np.linalg.eigh(m + 1e-30 * eye)
+            except np.linalg.LinAlgError:
+                # fall back to float64
+                w, Q = np.linalg.eigh(m.astype(np.float64) + 1e-30 * np.eye(m.shape[0]))
+                Q = Q.astype(m.dtype)
+
+            # Flip eigenvectors to descending eigenvalues as in original code
+            Q = np.flip(Q, axis=1)
+            Q_list.append(Q)
+
+        self.Q[p] = Q_list
+
+    # ---------- Shampoo preconditioner update (outer products) ----------
+
+    def _update_preconditioner(self, grad_np, p):
+        """
+        Update GG[p] using the current gradient (in original space).
+        """
+        GG_list = self.GG[p]
+        if grad_np.ndim == 1:
+            if self.precondition_1d and grad_np.shape[0] <= self.max_precond_dim:
+                # GG_list[0] is (d,d)
+                g = grad_np[:, None]  # (d,1)
+                outer = g @ g.T       # (d,d)
+                beta = self.shampoo_beta
+                GG_list[0] = beta * GG_list[0] + (1.0 - beta) * outer
+        else:
+            shape = grad_np.shape
+            n_dims = len(shape)
+            for idx, sh in enumerate(shape):
+                if sh > self.max_precond_dim or len(GG_list[idx]) == 0:
+                    continue
+                # Contract across all dims except idx to build (sh, sh)
+                axes = list(range(n_dims))
+                axes.remove(idx)
+                outer = np.tensordot(
+                    grad_np,
+                    grad_np,
+                    axes=(axes, axes),
+                )  # (sh, sh)
+                beta = self.shampoo_beta
+                GG_list[idx] = beta * GG_list[idx] + (1.0 - beta) * outer
+
+        self.GG[p] = GG_list
+
+    # ---------- projection into Shampoo eigenbasis ----------
+
+    def _project(self, grad_np, p):
+        """
+        Project gradient into the eigenbases Q[p] (Shampoo space).
+        For each dimension k:
+            grad <- tensordot(grad, Q_k, dims=([k],[0]))
+        If Q_k is empty list, we "rotate" that dimension to the end (as in PyTorch code).
+        """
+        Q_list = self.Q[p]
+        g = grad_np
+
+        for Qk in Q_list:
+            if isinstance(Qk, list) or (isinstance(Qk, np.ndarray) and Qk.size == 0):
+                # Rotate first axis to the end
+                axes = list(range(g.ndim))
+                if g.ndim > 1:
+                    g = np.transpose(g, axes[1:] + axes[:1])
+                continue
+
+            # tensordot along axis 0 with Qk's axis 0
+            g = np.tensordot(g, Qk, axes=([0], [0]))
+            # result shape: (dim_Qk, ...) because we contracted on axis 0
+
+        return g
+
+    def _project_back(self, grad_np, p):
+        """
+        Project gradient back from Shampoo eigenbasis to original space.
+        For each dimension k:
+            grad <- tensordot(grad, Q_k, dims=([0],[1]))  # multiply by Q_k^T
+        """
+        Q_list = self.Q[p]
+        g = grad_np
+
+        for Qk in Q_list:
+            if isinstance(Qk, list) or (isinstance(Qk, np.ndarray) and Qk.size == 0):
+                # Rotate axes in the opposite direction
+                axes = list(range(g.ndim))
+                if g.ndim > 1:
+                    g = np.transpose(g, axes[-1:] + axes[:-1])
+                continue
+
+            # tensordot along axis 0 with Qk's axis 1 (i.e., multiply by Q^T)
+            g = np.tensordot(g, Qk, axes=([0], [1]))
+
+        return g
+
+    # ---------- main step ----------
+
+    def step(self):
+        """
+        Perform one SOAP optimization step over all parameters.
+        """
+        for p in self.params:
+            if p.grad is None:
+                continue
+
+            # Convert gradient to NumPy
+            g_np = self._to_numpy(p.grad.data)
+
+            # Decoupled weight decay (AdamW-style) is applied AFTER the SOAP update,
+            # as in the original implementation.
+            # But we include the L2 term in g_np only if you want coupled decay;
+            # here we stick to decoupled, so we do NOT add weight_decay to g_np.
+
+            # Initialize per-parameter state if needed
+            if p not in self.step_count:
+                self.step_count[p] = 0
+                self.exp_avg[p] = np.zeros_like(g_np)
+                self.exp_avg_sq[p] = np.zeros_like(g_np)
+                self._init_preconditioner(g_np, p)
+                # First call: update GG and compute Q, but skip Adam step
+                self._update_preconditioner(g_np, p)
+                self._compute_eigenbases(p)
+                # Next iteration we'll start using SOAP updates
+                continue
+
+            # If we have not yet computed eigenbases Q[p], do so
+            if self.Q[p] is None:
+                self._compute_eigenbases(p)
+
+            # Project gradient into Shampoo eigenbasis
+            grad_proj = self._project(g_np, p)
+
+            # Adam moments in Shampoo space
+            self.step_count[p] += 1
+            t = self.step_count[p]
+
+            exp_avg = self.exp_avg[p]
+            exp_avg_sq = self.exp_avg_sq[p]
+
+            beta1, beta2 = self.beta1, self.beta2
+
+            exp_avg = beta1 * exp_avg + (1.0 - beta1) * grad_proj
+            exp_avg_sq = beta2 * exp_avg_sq + (1.0 - beta2) * (grad_proj ** 2)
+
+            self.exp_avg[p] = exp_avg
+            self.exp_avg_sq[p] = exp_avg_sq
+
+            denom = np.sqrt(exp_avg_sq) + self.eps
+
+            step_size = self.lr
+            if self.correct_bias:
+                bias_c1 = 1.0 - beta1 ** t
+                bias_c2 = 1.0 - beta2 ** t
+                step_size = step_size * (bias_c2 ** 0.5) / bias_c1
+
+            # "Adam step" in Shampoo space
+            precond_proj = exp_avg / denom
+
+            # Project back to original space
+            update_np = self._project_back(precond_proj, p)
+
+            if self.normalize_grads:
+                rms = np.sqrt((update_np ** 2).mean())
+                if rms > 0.0:
+                    update_np = update_np / (rms + 1e-30)
+
+            # Convert update back to Tensor, apply param update
+            update_tensor = self._from_numpy(update_np, p.data)
+            new_data = p.data - step_size * update_tensor
+
+            # Decoupled weight decay (AdamW-style)
+            if self.weight_decay > 0.0:
+                new_data = new_data - self.lr * self.weight_decay * p.data
+
+            p.data = new_data
+
+            # Update Shampoo GG and eigenbases periodically
+            self._update_preconditioner(g_np, p)
+            if t % self.precondition_frequency == 0:
+                self._compute_eigenbases(p)
 
 
 
@@ -387,146 +692,146 @@ class Muon(Optimizer):
 #             self.m[p] = m.data
 #             self.v[p] = v.data
 
-class SOAP(Optimizer):
-    """
-    SOAP-like optimizer (factored second moment, Adam-style first moment).
+# class SOAP(Optimizer):
+#     """
+#     SOAP-like optimizer (factored second moment, Adam-style first moment).
 
-    Conceptual behavior:
-    - For 2D parameters (weight matrices), maintain factored second-moment
-      statistics (per-row and per-column) like Adafactor:
-        * row_v[p]: shape (out_dim,)
-        * col_v[p]: shape (in_dim,)
-      and approximate per-element second moment via outer-product-style
-      row/col RMS.
-    - For non-2D parameters (biases, LN weights, conv kernels if 4D),
-      fall back to standard Adam-style diagonal second moment v[p].
+#     Conceptual behavior:
+#     - For 2D parameters (weight matrices), maintain factored second-moment
+#       statistics (per-row and per-column) like Adafactor:
+#         * row_v[p]: shape (out_dim,)
+#         * col_v[p]: shape (in_dim,)
+#       and approximate per-element second moment via outer-product-style
+#       row/col RMS.
+#     - For non-2D parameters (biases, LN weights, conv kernels if 4D),
+#       fall back to standard Adam-style diagonal second moment v[p].
 
-    This is not full SOAP (which would run Adam in the eigenbasis of a
-    Shampoo preconditioner), but a memory-efficient Adam variant inspired
-    by Adafactor / Shampoo / SOAP ideas.
-    """
-    def __init__(
-        self,
-        params,
-        lr=0.001,
-        beta1=0.9,
-        beta2=0.999,
-        eps=1e-8,
-        weight_decay=0.0,
-    ):
-        super().__init__(params)
-        self.lr = lr
-        self.beta1 = beta1
-        self.beta2 = beta2
-        self.eps = eps
-        self.weight_decay = weight_decay
-        self.t = 0
+#     This is not full SOAP (which would run Adam in the eigenbasis of a
+#     Shampoo preconditioner), but a memory-efficient Adam variant inspired
+#     by Adafactor / Shampoo / SOAP ideas.
+#     """
+#     def __init__(
+#         self,
+#         params,
+#         lr=0.001,
+#         beta1=0.9,
+#         beta2=0.999,
+#         eps=1e-8,
+#         weight_decay=0.0,
+#     ):
+#         super().__init__(params)
+#         self.lr = lr
+#         self.beta1 = beta1
+#         self.beta2 = beta2
+#         self.eps = eps
+#         self.weight_decay = weight_decay
+#         self.t = 0
 
-        # First moment
-        self.m = {}
-        # Diagonal second moment fallback (Adam-style)
-        self.v = {}
-        # Factored second moments for matrix-shaped params
-        self.row_v = {}
-        self.col_v = {}
+#         # First moment
+#         self.m = {}
+#         # Diagonal second moment fallback (Adam-style)
+#         self.v = {}
+#         # Factored second moments for matrix-shaped params
+#         self.row_v = {}
+#         self.col_v = {}
 
-    def step(self):
-        self.t += 1
+#     def step(self):
+#         self.t += 1
 
-        for p in self.params:
-            if p.grad is None:
-                continue
+#         for p in self.params:
+#             if p.grad is None:
+#                 continue
 
-            # Get gradient as NDArray
-            g = p.grad.data
+#             # Get gradient as NDArray
+#             g = p.grad.data
 
-            # L2-style weight decay (classic, not decoupled AdamW)
-            if self.weight_decay != 0.0:
-                g = g + self.weight_decay * p.data
+#             # L2-style weight decay (classic, not decoupled AdamW)
+#             if self.weight_decay != 0.0:
+#                 g = g + self.weight_decay * p.data
 
-            # Initialize first moment
-            if p not in self.m:
-                self.m[p] = 0 * g
+#             # Initialize first moment
+#             if p not in self.m:
+#                 self.m[p] = 0 * g
 
-            m_prev = self.m[p]
-            # First moment update (Adam)
-            m = self.beta1 * m_prev + (1.0 - self.beta1) * g
-            # Bias correction for m
-            m_hat = m / (1.0 - self.beta1 ** self.t)
+#             m_prev = self.m[p]
+#             # First moment update (Adam)
+#             m = self.beta1 * m_prev + (1.0 - self.beta1) * g
+#             # Bias correction for m
+#             m_hat = m / (1.0 - self.beta1 ** self.t)
 
-            shape = g.shape
+#             shape = g.shape
 
-            # -------------------------
-            # 2D parameters: factored stats (Adafactor-like)
-            # -------------------------
-            if len(shape) == 2:
-                out_dim, in_dim = shape
+#             # -------------------------
+#             # 2D parameters: factored stats (Adafactor-like)
+#             # -------------------------
+#             if len(shape) == 2:
+#                 out_dim, in_dim = shape
 
-                # Lazy init for row/col stats
-                if p not in self.row_v:
-                    # row_v[p] shape: (out_dim,)
-                    # col_v[p] shape: (in_dim,)
-                    # Use g**2 sums to get correct shapes, then zero them out.
-                    row_init = (g ** 2).sum(axes=1) * 0
-                    col_init = (g ** 2).sum(axes=0) * 0
-                    self.row_v[p] = row_init
-                    self.col_v[p] = col_init
+#                 # Lazy init for row/col stats
+#                 if p not in self.row_v:
+#                     # row_v[p] shape: (out_dim,)
+#                     # col_v[p] shape: (in_dim,)
+#                     # Use g**2 sums to get correct shapes, then zero them out.
+#                     row_init = (g ** 2).sum(axes=1) * 0
+#                     col_init = (g ** 2).sum(axes=0) * 0
+#                     self.row_v[p] = row_init
+#                     self.col_v[p] = col_init
 
-                g2 = g ** 2
+#                 g2 = g ** 2
 
-                row_v_prev = self.row_v[p]
-                col_v_prev = self.col_v[p]
+#                 row_v_prev = self.row_v[p]
+#                 col_v_prev = self.col_v[p]
 
-                # Exponential moving average of squared-grad row/col sums
-                row_v = self.beta2 * row_v_prev + (1.0 - self.beta2) * g2.sum(axes=1)
-                col_v = self.beta2 * col_v_prev + (1.0 - self.beta2) * g2.sum(axes=0)
+#                 # Exponential moving average of squared-grad row/col sums
+#                 row_v = self.beta2 * row_v_prev + (1.0 - self.beta2) * g2.sum(axes=1)
+#                 col_v = self.beta2 * col_v_prev + (1.0 - self.beta2) * g2.sum(axes=0)
 
-                self.row_v[p] = row_v
-                self.col_v[p] = col_v
+#                 self.row_v[p] = row_v
+#                 self.col_v[p] = col_v
 
-                # Bias correction for factored stats
-                row_v_hat = row_v / (1.0 - self.beta2 ** self.t)
-                col_v_hat = col_v / (1.0 - self.beta2 ** self.t)
+#                 # Bias correction for factored stats
+#                 row_v_hat = row_v / (1.0 - self.beta2 ** self.t)
+#                 col_v_hat = col_v / (1.0 - self.beta2 ** self.t)
 
-                # Adafactor-style RMS per row/col
-                # (divide by dimension to approximate average per element)
-                row_rms = (row_v_hat / float(in_dim)) ** 0.5   # (out_dim,)
-                col_rms = (col_v_hat / float(out_dim)) ** 0.5  # (in_dim,)
+#                 # Adafactor-style RMS per row/col
+#                 # (divide by dimension to approximate average per element)
+#                 row_rms = (row_v_hat / float(in_dim)) ** 0.5   # (out_dim,)
+#                 col_rms = (col_v_hat / float(out_dim)) ** 0.5  # (in_dim,)
 
-                # Reshape to enable broadcasting to full matrix shape
-                row_rms = row_rms.reshape((out_dim, 1))        # (out_dim, 1)
-                col_rms = col_rms.reshape((1, in_dim))         # (1, in_dim)
+#                 # Reshape to enable broadcasting to full matrix shape
+#                 row_rms = row_rms.reshape((out_dim, 1))        # (out_dim, 1)
+#                 col_rms = col_rms.reshape((1, in_dim))         # (1, in_dim)
 
-                row_mat = row_rms.broadcast_to((out_dim, in_dim))
-                col_mat = col_rms.broadcast_to((out_dim, in_dim))
+#                 row_mat = row_rms.broadcast_to((out_dim, in_dim))
+#                 col_mat = col_rms.broadcast_to((out_dim, in_dim))
 
-                # Approximate per-element RMS
-                denom = row_mat * col_mat + self.eps           # (out_dim, in_dim)
+#                 # Approximate per-element RMS
+#                 denom = row_mat * col_mat + self.eps           # (out_dim, in_dim)
 
-                # Preconditioned update (Adam-like in factored space)
-                precond_grad = m_hat / denom
+#                 # Preconditioned update (Adam-like in factored space)
+#                 precond_grad = m_hat / denom
 
-            # -------------------------
-            # Non-2D parameters: fallback to Adam-style diag v
-            # -------------------------
-            else:
-                if p not in self.v:
-                    self.v[p] = 0 * g
+#             # -------------------------
+#             # Non-2D parameters: fallback to Adam-style diag v
+#             # -------------------------
+#             else:
+#                 if p not in self.v:
+#                     self.v[p] = 0 * g
 
-                v_prev = self.v[p]
-                v = self.beta2 * v_prev + (1.0 - self.beta2) * (g ** 2)
-                self.v[p] = v
+#                 v_prev = self.v[p]
+#                 v = self.beta2 * v_prev + (1.0 - self.beta2) * (g ** 2)
+#                 self.v[p] = v
 
-                # Bias correction for v
-                v_hat = v / (1.0 - self.beta2 ** self.t)
+#                 # Bias correction for v
+#                 v_hat = v / (1.0 - self.beta2 ** self.t)
 
-                precond_grad = m_hat / (v_hat ** 0.5 + self.eps)
+#                 precond_grad = m_hat / (v_hat ** 0.5 + self.eps)
 
-            # Parameter update
-            new_data = p.data - self.lr * precond_grad
+#             # Parameter update
+#             new_data = p.data - self.lr * precond_grad
 
-            # Write back to Tensor's underlying data
-            p.data = type(p)(new_data, dtype=p.dtype, device=p.device)
+#             # Write back to Tensor's underlying data
+#             p.data = type(p)(new_data, dtype=p.dtype, device=p.device)
 
-            # Store first moment
-            self.m[p] = m
+#             # Store first moment
+#             self.m[p] = m

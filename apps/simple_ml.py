@@ -124,7 +124,7 @@ def epoch_general_cifar10(dataloader, model, loss_fn=nn.SoftmaxLoss(), opt=None)
     total_loss = 0.0
     total_correct = 0
     total_examples = 0
-
+    
     for X, y in dataloader:
         X = ndl.Tensor(X.numpy(), device=model.device, dtype="float32")
         y = ndl.Tensor(y.numpy(), device=model.device, dtype="float32")
