@@ -130,41 +130,48 @@ def epoch_general_cifar10(dataloader, model, loss_fn=nn.SoftmaxLoss(), opt=None,
             break
         X = ndl.Tensor(X.numpy(), device=model.device, dtype="float32")
         y = ndl.Tensor(y.numpy(), device=model.device, dtype="float32")
-        
-        # Convert X to Tensor if needed
-        if not isinstance(X, ndl.Tensor):
-            X = ndl.Tensor(
-                np.array(X, dtype=np.float32),
-                device=param_device,
-                dtype="float32",
-            )
-        # Convert y to Tensor of integer labels if needed
-        if not isinstance(y, ndl.Tensor):
-            y = ndl.Tensor(
-                np.array(y, dtype=np.int32),
-                device=param_device,
-                dtype="int32",
-            )
-
+    
+        # DEBUG: Print data stats
+        if i == 0:
+            print(f"\nDEBUG Batch {i}:")
+            print(f"  X shape: {X.shape}, X range: [{X.numpy().min():.4f}, {X.numpy().max():.4f}]")
+            print(f"  y shape: {y.shape}, y unique values: {np.unique(y.numpy())}")
+    
         batch_size = y.shape[0]
         total_examples += batch_size
-
+    
         # Forward pass
         logits = model(X)
+    
+        # DEBUG: Print logits stats
+        if i == 0:
+            print(f"  logits shape: {logits.shape}")
+            print(f"  logits sample [0]: {logits.numpy()[0]}")
+            print(f"  logits mean: {logits.numpy().mean():.4f}, std: {logits.numpy().std():.4f}")
+            print(f"  predictions: {logits.numpy().argmax(axis=1)[:10]}")
+    
         loss = loss_fn(logits, y)
-
-        # Accuracy (computed on CPU via numpy)
-        preds = logits.numpy().argmax(axis=1)
-        true = y.numpy().astype(np.int32).reshape(-1)
-        batch_correct = (preds == true).sum()
-
-        total_correct += int(batch_correct)
-        total_loss += float(loss.numpy()) * batch_size
-
+    
         # Backward & step if training
         if opt is not None:
             opt.reset_grad()
             loss.backward()
+    
+            # DEBUG: Check if gradients exist and are non-zero
+            if i == 0:
+                has_grad = False
+                total_grad_norm = 0.0
+                for param_idx, p in enumerate(model.parameters()):
+                    if p.grad is not None:
+                        grad_norm = np.sqrt((p.grad.numpy() ** 2).sum())
+                        total_grad_norm += grad_norm
+                        if param_idx == 0:  # First parameter
+                            print(f"  First param grad norm: {grad_norm:.6f}")
+                        has_grad = True
+                print(f"  Total grad norm: {total_grad_norm:.6f}")
+                if not has_grad:
+                    print("  WARNING: No gradients!")
+    
             opt.step()
 
     avg_acc = total_correct / total_examples
