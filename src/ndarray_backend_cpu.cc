@@ -5,6 +5,9 @@
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <algorithm>
+#include <cstring>
+#include <vector>
 
 namespace needle {
 namespace cpu {
@@ -489,6 +492,210 @@ void ReduceSum(const AlignedArray& a, AlignedArray* out, size_t reduce_size) {
   }
 }
 
+// ===========================================================================
+// EIGENDECOMPOSITION (Pure C++ implementation)
+// ===========================================================================
+
+void Eigh(const AlignedArray& a, AlignedArray* eigenvalues, AlignedArray* eigenvectors, int n) {
+  /**
+   * Compute eigenvalues and eigenvectors of a symmetric matrix using QR algorithm.
+   *
+   * Algorithm outline:
+   *   1. Reduce to tridiagonal form via Householder reflections
+   *   2. Apply QR iteration with Wilkinson shifts to find eigenvalues
+   *   3. Accumulate transformations to get eigenvectors
+   */
+
+  const int max_iter = 100;
+  const float eps = 1e-10f;
+
+  // Initialize eigenvectors to identity
+  for (int i = 0; i < n * n; i++) eigenvectors->ptr[i] = 0.0f;
+  for (int i = 0; i < n; i++) eigenvectors->ptr[i * n + i] = 1.0f;
+
+  // Copy matrix to work with (will become tridiagonal)
+  std::vector<float> diag(n);      // Main diagonal
+  std::vector<float> offdiag(n);   // Off-diagonal (subdiagonal)
+  std::vector<float> matrix(n * n);
+  std::memcpy(matrix.data(), a.ptr, n * n * sizeof(float));
+
+  // =========================================================================
+  // STEP 1: Householder reduction to tridiagonal form
+  // =========================================================================
+  // For symmetric matrices, we can reduce to tridiagonal (not just Hessenberg)
+  // This makes subsequent QR iterations much cheaper: O(n) per iteration
+
+  for (int k = 0; k < n - 2; k++) {
+    // Compute Householder vector for column k (below diagonal)
+    float scale = 0.0f;
+    for (int i = k + 1; i < n; i++) {
+      scale += matrix[i * n + k] * matrix[i * n + k];
+    }
+    scale = std::sqrt(scale);
+
+    if (scale < eps) continue;
+
+    // Choose sign to avoid cancellation
+    if (matrix[(k + 1) * n + k] > 0) scale = -scale;
+
+    float h = scale * (scale - matrix[(k + 1) * n + k]);
+    std::vector<float> v(n, 0.0f);
+    v[k + 1] = matrix[(k + 1) * n + k] - scale;
+    for (int i = k + 2; i < n; i++) {
+      v[i] = matrix[i * n + k];
+    }
+
+    // Apply Householder: A <- (I - 2vv^T/h) A (I - 2vv^T/h)
+    // Since A is symmetric, this preserves symmetry
+
+    // Compute w = A * v / h
+    std::vector<float> w(n, 0.0f);
+    for (int i = 0; i < n; i++) {
+      for (int j = k + 1; j < n; j++) {
+        w[i] += matrix[i * n + j] * v[j];
+      }
+      w[i] /= h;
+    }
+
+    // Compute correction: w <- w - (w^T v / 2h) * v
+    float wv = 0.0f;
+    for (int i = k + 1; i < n; i++) wv += w[i] * v[i];
+    wv /= (2.0f * h);
+    for (int i = k + 1; i < n; i++) w[i] -= wv * v[i];
+
+    // Apply: A <- A - v w^T - w v^T
+    for (int i = k + 1; i < n; i++) {
+      for (int j = k + 1; j < n; j++) {
+        matrix[i * n + j] -= v[i] * w[j] + w[i] * v[j];
+      }
+    }
+
+    // Store the transformed column
+    matrix[(k + 1) * n + k] = scale;
+    for (int i = k + 2; i < n; i++) {
+      matrix[i * n + k] = 0.0f;
+      matrix[k * n + i] = 0.0f;
+    }
+
+    // Accumulate eigenvector transformation: Q <- Q * (I - 2vv^T/h)
+    for (int i = 0; i < n; i++) {
+      float dot = 0.0f;
+      for (int j = k + 1; j < n; j++) {
+        dot += eigenvectors->ptr[i * n + j] * v[j];
+      }
+      dot *= 2.0f / h;
+      for (int j = k + 1; j < n; j++) {
+        eigenvectors->ptr[i * n + j] -= dot * v[j];
+      }
+    }
+  }
+
+  // Extract tridiagonal elements
+  for (int i = 0; i < n; i++) {
+    diag[i] = matrix[i * n + i];
+    if (i < n - 1) offdiag[i] = matrix[(i + 1) * n + i];
+  }
+  offdiag[n - 1] = 0.0f;
+
+  // =========================================================================
+  // STEP 2: QR iteration on tridiagonal matrix (implicit shifts)
+  // =========================================================================
+  // This is where eigenvalues are actually computed
+  // We use Wilkinson shift for faster convergence
+
+  for (int l = 0; l < n; l++) {
+    int iter = 0;
+
+    while (iter < max_iter) {
+      // Find small off-diagonal element to split
+      int m;
+      for (m = l; m < n - 1; m++) {
+        float test = std::abs(diag[m]) + std::abs(diag[m + 1]);
+        if (std::abs(offdiag[m]) < eps * test) break;
+      }
+
+      if (m == l) break;  // Converged
+
+      // Wilkinson shift: eigenvalue of trailing 2x2 closer to diag[m]
+      float d = (diag[m - 1] - diag[m]) / (2.0f * offdiag[m - 1]);
+      float r = std::sqrt(d * d + 1.0f);
+      float shift = diag[m] - offdiag[m - 1] / (d + (d >= 0 ? r : -r));
+
+      // Implicit QR step with shift
+      float c = 1.0f, s = 0.0f;
+      float p = diag[l] - shift;
+      float q = offdiag[l];
+
+      for (int i = l; i < m; i++) {
+        // Givens rotation to zero out element
+        float r_val = std::sqrt(p * p + q * q);
+        float c_new = p / r_val;
+        float s_new = q / r_val;
+
+        // Update tridiagonal elements
+        if (i > l) offdiag[i - 1] = r_val;
+
+        float d1 = diag[i];
+        float d2 = diag[i + 1];
+        float e = offdiag[i];
+
+        diag[i] = c_new * c_new * d1 + 2.0f * c_new * s_new * e + s_new * s_new * d2;
+        diag[i + 1] = s_new * s_new * d1 - 2.0f * c_new * s_new * e + c_new * c_new * d2;
+        offdiag[i] = c_new * s_new * (d1 - d2) + (c_new * c_new - s_new * s_new) * e;
+
+        // Accumulate eigenvector rotation
+        for (int k = 0; k < n; k++) {
+          float tmp = eigenvectors->ptr[k * n + i];
+          eigenvectors->ptr[k * n + i] = c_new * tmp + s_new * eigenvectors->ptr[k * n + i + 1];
+          eigenvectors->ptr[k * n + i + 1] = -s_new * tmp + c_new * eigenvectors->ptr[k * n + i + 1];
+        }
+
+        if (i < m - 1) {
+          p = offdiag[i];
+          q = s_new * offdiag[i + 1];
+          offdiag[i + 1] *= c_new;
+        }
+
+        c = c_new;
+        s = s_new;
+      }
+
+      offdiag[m - 1] = s * p;
+      iter++;
+    }
+
+    if (iter >= max_iter) {
+      throw std::runtime_error("Eigendecomposition failed to converge");
+    }
+  }
+
+  // Copy eigenvalues to output
+  for (int i = 0; i < n; i++) {
+    eigenvalues->ptr[i] = diag[i];
+  }
+
+  // =========================================================================
+  // STEP 3: Sort eigenvalues (ascending) and reorder eigenvectors
+  // =========================================================================
+
+  std::vector<int> idx(n);
+  for (int i = 0; i < n; i++) idx[i] = i;
+  std::sort(idx.begin(), idx.end(), [&](int a, int b) {
+    return eigenvalues->ptr[a] < eigenvalues->ptr[b];
+  });
+
+  std::vector<float> sorted_vals(n);
+  std::vector<float> sorted_vecs(n * n);
+
+  for (int i = 0; i < n; i++) {
+    sorted_vals[i] = eigenvalues->ptr[idx[i]];
+    for (int j = 0; j < n; j++) {
+      sorted_vecs[j * n + i] = eigenvectors->ptr[j * n + idx[i]];
+    }
+  }
+
+  std::memcpy(eigenvalues->ptr, sorted_vals.data(), n * sizeof(float));
+  std::memcpy(eigenvectors->ptr, sorted_vecs.data(), n * n * sizeof(float));
 }  // namespace cpu
 }  // namespace needle
 
@@ -549,4 +756,5 @@ PYBIND11_MODULE(ndarray_backend_cpu, m) {
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);
+  m.def("eigh", Eigh);
 }
