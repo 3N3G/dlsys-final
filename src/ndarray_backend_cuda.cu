@@ -5,6 +5,10 @@
 
 #include <iostream>
 #include <sstream>
+#include <vector>     
+#include <algorithm>  
+#include <cstring>    
+
 
 namespace needle {
 namespace cuda {
@@ -656,6 +660,182 @@ void ReduceSum(const CudaArray& a, CudaArray* out, size_t reduce_size) {
   /// END SOLUTION
 }
 
+// ===========================================================================
+// EIGENDECOMPOSITION (host-side QR, with device I/O)
+// ===========================================================================
+
+void Eigh(const CudaArray& a, CudaArray* eigenvalues, CudaArray* eigenvectors, int n) {
+  // Copy input matrix from device to host
+  std::vector<scalar_t> matrix(n * n);
+  cudaError_t err = cudaMemcpy(matrix.data(), a.ptr, n * n * ELEM_SIZE, cudaMemcpyDeviceToHost);
+  if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+
+  // Host-side buffers
+  std::vector<scalar_t> diag(n);
+  std::vector<scalar_t> offdiag(n);
+  std::vector<scalar_t> vecs(n * n);
+
+  const int max_iter = 100;
+  const scalar_t eps = (scalar_t)1e-10;
+
+  // Initialize eigenvectors to identity
+  for (int i = 0; i < n * n; i++) vecs[i] = 0.0f;
+  for (int i = 0; i < n; i++) vecs[i * n + i] = 1.0f;
+
+  // Householder reduction to tridiagonal
+  for (int k = 0; k < n - 2; k++) {
+    scalar_t scale = 0.0f;
+    for (int i = k + 1; i < n; i++) {
+      scalar_t v = matrix[i * n + k];
+      scale += v * v;
+    }
+    scale = std::sqrt(scale);
+    if (scale < eps) continue;
+
+    if (matrix[(k + 1) * n + k] > 0) scale = -scale;
+
+    scalar_t h = scale * (scale - matrix[(k + 1) * n + k]);
+    std::vector<scalar_t> v(n, 0.0f);
+    v[k + 1] = matrix[(k + 1) * n + k] - scale;
+    for (int i = k + 2; i < n; i++) {
+      v[i] = matrix[i * n + k];
+    }
+
+    std::vector<scalar_t> w(n, 0.0f);
+    for (int i = 0; i < n; i++) {
+      scalar_t acc = 0.0f;
+      for (int j = k + 1; j < n; j++) {
+        acc += matrix[i * n + j] * v[j];
+      }
+      w[i] = acc / h;
+    }
+
+    scalar_t wv = 0.0f;
+    for (int i = k + 1; i < n; i++) wv += w[i] * v[i];
+    wv /= (2.0f * h);
+    for (int i = k + 1; i < n; i++) w[i] -= wv * v[i];
+
+    for (int i = k + 1; i < n; i++) {
+      for (int j = k + 1; j < n; j++) {
+        matrix[i * n + j] -= v[i] * w[j] + w[i] * v[j];
+      }
+    }
+
+    matrix[(k + 1) * n + k] = scale;
+    matrix[k * n + (k + 1)] = scale;
+    for (int i = k + 2; i < n; i++) {
+      matrix[i * n + k] = 0.0f;
+      matrix[k * n + i] = 0.0f;
+    }
+
+    // accumulate into vecs
+    for (int i = 0; i < n; i++) {
+      scalar_t dot = 0.0f;
+      for (int j = k + 1; j < n; j++) {
+        dot += vecs[i * n + j] * v[j];
+      }
+      dot *= (scalar_t)(2.0) / h;
+      for (int j = k + 1; j < n; j++) {
+        vecs[i * n + j] -= dot * v[j];
+      }
+    }
+  }
+
+  // Extract tridiagonal
+  for (int i = 0; i < n; i++) {
+    diag[i] = matrix[i * n + i];
+    if (i < n - 1) offdiag[i] = matrix[(i + 1) * n + i];
+  }
+  offdiag[n - 1] = 0.0f;
+
+  // QR iterations with Wilkinson shifts
+  for (int l = 0; l < n; l++) {
+    int iter = 0;
+    while (iter < max_iter) {
+      int m;
+      for (m = l; m < n - 1; m++) {
+        scalar_t test = std::abs(diag[m]) + std::abs(diag[m + 1]);
+        if (std::abs(offdiag[m]) < eps * test) break;
+      }
+      if (m == l) break;
+
+      scalar_t d = (diag[m - 1] - diag[m]) / (2.0f * offdiag[m - 1]);
+      scalar_t r = std::sqrt(d * d + 1.0f);
+      scalar_t shift = diag[m] - offdiag[m - 1] / (d + (d >= 0 ? r : -r));
+
+      scalar_t p = diag[l] - shift;
+      scalar_t q = offdiag[l];
+
+      for (int i = l; i < m; i++) {
+        scalar_t r_val = std::sqrt(p * p + q * q);
+        scalar_t c = p / r_val;
+        scalar_t s = q / r_val;
+
+        if (i > l) offdiag[i - 1] = r_val;
+
+        scalar_t d1 = diag[i];
+        scalar_t d2 = diag[i + 1];
+        scalar_t e = offdiag[i];
+
+        scalar_t cc = c * c;
+        scalar_t ss = s * s;
+        scalar_t cs2 = 2.0f * c * s;
+
+        diag[i] = cc * d1 + cs2 * e + ss * d2;
+        diag[i + 1] = ss * d1 - cs2 * e + cc * d2;
+        offdiag[i] = c * s * (d1 - d2) + (cc - ss) * e;
+
+        for (int k = 0; k < n; k++) {
+          scalar_t t = vecs[k * n + i];
+          scalar_t u = vecs[k * n + i + 1];
+          vecs[k * n + i] = c * t + s * u;
+          vecs[k * n + i + 1] = -s * t + c * u;
+        }
+
+        if (i < m - 1) {
+          p = offdiag[i];
+          q = s * offdiag[i + 1];
+          offdiag[i + 1] *= c;
+        } else {
+          p = offdiag[i];
+          q = 0.0f;
+        }
+      }
+
+      offdiag[m - 1] = p;
+      iter++;
+    }
+
+    if (iter >= max_iter) {
+      throw std::runtime_error("Cuda Eigh failed to converge");
+    }
+  }
+
+  // Sort eigenvalues and eigenvectors (ascending)
+  std::vector<int> idx(n);
+  for (int i = 0; i < n; i++) idx[i] = i;
+  std::sort(idx.begin(), idx.end(), [&](int a_i, int b_i) {
+    return diag[a_i] < diag[b_i];
+  });
+
+  std::vector<scalar_t> sorted_vals(n);
+  std::vector<scalar_t> sorted_vecs(n * n);
+  for (int i = 0; i < n; i++) {
+    int src_col = idx[i];
+    sorted_vals[i] = diag[src_col];
+    for (int j = 0; j < n; j++) {
+      sorted_vecs[j * n + i] = vecs[j * n + src_col];
+    }
+  }
+
+  // Copy results back to device
+  err = cudaMemcpy(eigenvalues->ptr, sorted_vals.data(), n * ELEM_SIZE, cudaMemcpyHostToDevice);
+  if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+  err = cudaMemcpy(eigenvectors->ptr, sorted_vecs.data(), n * n * ELEM_SIZE, cudaMemcpyHostToDevice);
+  if (err != cudaSuccess) throw std::runtime_error(cudaGetErrorString(err));
+}
+
+
 }  // namespace cuda
 }  // namespace needle
 
@@ -725,4 +905,6 @@ PYBIND11_MODULE(ndarray_backend_cuda, m) {
 
   m.def("reduce_max", ReduceMax);
   m.def("reduce_sum", ReduceSum);
+
+  m.def("eigh", Eigh);
 }
