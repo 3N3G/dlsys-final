@@ -343,6 +343,7 @@ class SOAP(Optimizer):
         normalize_grads: bool = False,
         data_format: str = "channels_first",
         correct_bias: bool = True,
+        total_steps=None,
     ):
         super().__init__(params)
         self.lr = lr
@@ -359,6 +360,9 @@ class SOAP(Optimizer):
         self.data_format = data_format
         self.correct_bias = correct_bias
 
+        self.total_steps = total_steps
+        self.t = 0
+
         if self.merge_dims:
             # You can remove this assert and port the full merge_dims logic if you like.
             raise NotImplementedError("merge_dims=True not yet supported in Needle SOAP.")
@@ -371,6 +375,21 @@ class SOAP(Optimizer):
         self.Q = {}            # p -> list of np.ndarray or [] for skipped dims
 
     # ---------- small helpers working in NumPy space ----------
+
+    def _current_lr(self):
+        """
+        Compute current muon_lr and sgd_lr according to linear decay:
+            lr_t = lr_0 * (1 - t / total_steps)
+        If total_steps is None or <= 0, use constant LRs.
+        """
+        return self.lr
+        if self.total_steps is None or self.total_steps <= 0:
+            return self.lr
+
+        # self.t is incremented at the start of step(); mirror CifarNet "step" usage
+        decay = max(0.0, 1.0 - self.t / float(self.total_steps))
+        lr = self.lr * decay
+        return lr 
 
     def _to_numpy(self, tensor):
         """Tensor -> numpy.ndarray (detach)."""
@@ -609,6 +628,7 @@ class SOAP(Optimizer):
             self._update_preconditioner(g_np, p)
             if t % self.precondition_frequency == 0:
                 self._compute_eigenbases(p)
+
 
 
 
