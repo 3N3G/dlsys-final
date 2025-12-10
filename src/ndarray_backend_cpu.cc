@@ -681,6 +681,8 @@ void Eigh(const AlignedArray& a, AlignedArray* eigenvalues, AlignedArray* eigenv
 
   std::memcpy(eigenvalues->ptr, sorted_vals.data(), n * sizeof(float));
   std::memcpy(eigenvectors->ptr, sorted_vecs.data(), n * n * sizeof(float));
+}  
+
 }  // namespace cpu
 }  // namespace needle
 
