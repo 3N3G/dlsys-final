@@ -499,11 +499,6 @@ void ReduceSum(const AlignedArray& a, AlignedArray* out, size_t reduce_size) {
 void Eigh(const AlignedArray& a, AlignedArray* eigenvalues, AlignedArray* eigenvectors, int n) {
   /**
    * Compute eigenvalues and eigenvectors of a symmetric matrix using QR algorithm.
-   *
-   * Algorithm outline:
-   *   1. Reduce to tridiagonal form via Householder reflections
-   *   2. Apply QR iteration with Wilkinson shifts to find eigenvalues
-   *   3. Accumulate transformations to get eigenvectors
    */
 
   const int max_iter = 100;
@@ -518,12 +513,8 @@ void Eigh(const AlignedArray& a, AlignedArray* eigenvalues, AlignedArray* eigenv
   std::vector<float> offdiag(n);   // Off-diagonal (subdiagonal)
   std::vector<float> matrix(n * n);
   std::memcpy(matrix.data(), a.ptr, n * n * sizeof(float));
-
-  // =========================================================================
+  
   // STEP 1: Householder reduction to tridiagonal form
-  // =========================================================================
-  // For symmetric matrices, we can reduce to tridiagonal (not just Hessenberg)
-  // This makes subsequent QR iterations much cheaper: O(n) per iteration
 
   for (int k = 0; k < n - 2; k++) {
     // Compute Householder vector for column k (below diagonal)
@@ -597,11 +588,7 @@ void Eigh(const AlignedArray& a, AlignedArray* eigenvalues, AlignedArray* eigenv
   }
   offdiag[n - 1] = 0.0f;
 
-  // =========================================================================
   // STEP 2: QR iteration on tridiagonal matrix (implicit shifts)
-  // =========================================================================
-  // This is where eigenvalues are actually computed
-  // We use Wilkinson shift for faster convergence
 
   for (int l = 0; l < n; l++) {
     int iter = 0;
@@ -674,10 +661,8 @@ void Eigh(const AlignedArray& a, AlignedArray* eigenvalues, AlignedArray* eigenv
     eigenvalues->ptr[i] = diag[i];
   }
 
-  // =========================================================================
   // STEP 3: Sort eigenvalues (ascending) and reorder eigenvectors
-  // =========================================================================
-
+  
   std::vector<int> idx(n);
   for (int i = 0; i < n; i++) idx[i] = i;
   std::sort(idx.begin(), idx.end(), [&](int a, int b) {
