@@ -327,7 +327,6 @@ class SOAP(Optimizer):
 
     def _current_lr(self):
         """Linear decay: lr_t = lr_0 * (1 - t / total_steps)"""
-        return self.lr
         if self.total_steps is None or self.total_steps <= 0:
             return self.lr
 
