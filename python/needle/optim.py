@@ -170,6 +170,7 @@ class Muon(Optimizer):
         self.nesterov = nesterov
         self.ns_steps = ns_steps  # Newton-Schulz iteration steps
         self.eps = eps
+        self.weight_decay = weight_decay
 
         self.total_steps = total_steps
         self.t = 0
@@ -224,6 +225,8 @@ class Muon(Optimizer):
                 continue
 
             g = p.grad.data
+            if self.weight_decay != 0.0:
+                g = g + self.weight_decay * p.data
 
             if p not in self.m:
                 self.m[p] = 0 * g
