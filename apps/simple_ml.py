@@ -179,6 +179,7 @@ def train_cifar10(
     weight_decay=0.001,
     optimizer_kwargs=None,
     loss_fn=nn.SoftmaxLoss,
+    return_history=False,
 ):
     """
     Performs {n_epochs} epochs of training.
@@ -195,10 +196,15 @@ def train_cifar10(
             muon_lr, sgd_lr, momentum, etc. If None, defaults to
             {"lr": lr, "weight_decay": weight_decay}.
         loss_fn: nn.Module class
+        return_history: if True, return per-epoch histories instead of just
+            the final (acc, loss).
 
     Returns:
-        avg_acc: average accuracy over dataset from last epoch of training
-        avg_loss: average loss over dataset from last epoch of training
+        If return_history is False (default):
+            avg_acc, avg_loss from last epoch of training
+        If return_history is True:
+            (train_acc_hist, train_loss_hist, test_acc_hist, test_loss_hist)
+            each a list of length n_epochs.
     """
     np.random.seed(4)
 
@@ -215,60 +221,33 @@ def train_cifar10(
     opt = optimizer(model.parameters(), **optimizer_kwargs)
     loss_module = loss_fn()
 
-    last_acc, last_loss = 0.0, 0.0
+    # Histories
+    train_acc_hist = []
+    train_loss_hist = []
+    test_acc_hist = []
+    test_loss_hist = []
+
     for epoch in range(n_epochs):
-        last_acc, last_loss = epoch_general_cifar10(
+        train_acc, train_loss = epoch_general_cifar10(
             dataloader, model, loss_fn=loss_module, opt=opt
         )
         test_acc, test_loss = evaluate_cifar10(model, dataloader)
+
+        train_acc_hist.append(train_acc)
+        train_loss_hist.append(train_loss)
+        test_acc_hist.append(test_acc)
+        test_loss_hist.append(test_loss)
+
         print(
             f"Epoch {epoch:02d} | "
-            f"train_acc={last_acc:.4f}, train_loss={last_loss:.4f} | "
+            f"train_acc={train_acc:.4f}, train_loss={train_loss:.4f} | "
             f"test_acc={test_acc:.4f}, test_loss={test_loss:.4f}"
         )
 
-    return last_acc, last_loss
-
-
-# def train_cifar10(model, dataloader, n_epochs=1, optimizer=ndl.optim.Adam,
-#           lr=0.001, weight_decay=0.001, loss_fn=nn.SoftmaxLoss):
-#     """
-#     Performs {n_epochs} epochs of training.
-
-#     Args:
-#         dataloader: Dataloader instance
-#         model: nn.Module instance
-#         n_epochs: number of epochs (int)
-#         optimizer: Optimizer class
-#         lr: learning rate (float)
-#         weight_decay: weight decay (float)
-#         loss_fn: nn.Module class
-
-#     Returns:
-#         avg_acc: average accuracy over dataset from last epoch of training
-#         avg_loss: average loss over dataset from last epoch of training
-#     """
-#     np.random.seed(4)
-#     ### BEGIN YOUR SOLUTION
-#     # Instantiate optimizer and loss module
-#     opt = optimizer(model.parameters(), lr=lr, weight_decay=weight_decay)
-#     loss_module = loss_fn()
-
-#     last_acc, last_loss = 0.0, 0.0
-#     for epoch in range(n_epochs):
-#         last_acc, last_loss = epoch_general_cifar10(
-#             dataloader, model, loss_fn=loss_module, opt=opt
-#         )
-#         test_acc, test_loss = evaluate_cifar10(model, dataloader)
-#         print(
-#             f"Epoch {epoch:02d} | "
-#             f"train_acc={last_acc:.4f}, train_loss={last_loss:.4f} | "
-#             f"test_acc={test_acc:.4f}, test_loss={test_loss:.4f}"
-#         )
-#         # print("ACCURACY ", last_acc, "LOSS ", last_loss)
-        
-#     return last_acc, last_loss
-#     ### END YOUR SOLUTION
+    if return_history:
+        return train_acc_hist, train_loss_hist, test_acc_hist, test_loss_hist
+    else:
+        return train_acc_hist[-1], train_loss_hist[-1]
 
 
 def evaluate_cifar10(model, dataloader, loss_fn=nn.SoftmaxLoss):
