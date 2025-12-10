@@ -4,24 +4,20 @@ import torch.optim as optim
 @torch.compile
 def zeropower_via_newtonschulz5(G, steps=5, eps=1e-7):
     """
-    Newton–Schulz iteration to compute an approximate
-    G @ (G^T G)^(-1/2), used to orthogonalize the gradient.
+    Newton-Schulz iteration to compute G @ (G^T G)^(-1/2) for gradient orthogonalization.
 
     G: (m, n) tensor
     """
     assert len(G.shape) == 2
     a, b, c = (3.4445, -4.7750, 2.0315)
 
-    # Normalize so top singular value <= 1
-    X = G
-    X = X / (X.norm() + eps)
+    X = G / (G.norm() + eps)
 
-    # Work with smaller dimension first if tall
     if X.size(0) > X.size(1):
         X = X.T
 
     for _ in range(steps):
-        A = X @ X.T          # (m, m)
+        A = X @ X.T
         B = b * A + c * (A @ A)
         X = a * X + B @ X
 
@@ -75,14 +71,10 @@ class Muon(optim.Optimizer):
         super().__init__(params, defaults)
 
         self.total_steps = total_steps
-        self.t = 0  # global step counter (like in your Needle code)
+        self.t = 0
 
     def _current_lrs(self, muon_lr0, sgd_lr0):
-        """
-        Linear decay:
-            lr_t = lr_0 * (1 - t / total_steps)
-        If total_steps is None, keep constant.
-        """
+        """Linear decay: lr_t = lr_0 * (1 - t / total_steps)"""
         if self.total_steps is None or self.total_steps <= 0:
             return muon_lr0, sgd_lr0
 
@@ -96,7 +88,6 @@ class Muon(optim.Optimizer):
             with torch.enable_grad():
                 loss = closure()
 
-        # Increment global step (mirrors Needle's self.t += 1)
         self.t += 1
 
         for group in self.param_groups:
@@ -123,10 +114,8 @@ class Muon(optim.Optimizer):
                     state["momentum_buffer"] = torch.zeros_like(g)
                 buf = state["momentum_buffer"]
 
-                # Momentum update: buf = m * buf + (1 - m) * g
                 buf.mul_(momentum).add_(g, alpha=(1.0 - momentum))
 
-                # Nesterov option
                 if nesterov:
                     update_grad = (1.0 - momentum) * g + momentum * buf
                 else:
@@ -135,22 +124,18 @@ class Muon(optim.Optimizer):
                 W = p.data
 
                 if W.ndim >= 2:
-                    # ---- Weight normalization (row-based) ----
                     rows = W.shape[0]
                     w_norm = W.norm()
                     if w_norm > 0:
                         scale = (rows ** 0.5) / (w_norm + eps)
                         W.mul_(scale)
 
-                    # ---- Newton–Schulz orthogonalization on gradient ----
                     G2d = update_grad.reshape(update_grad.shape[0], -1)
                     G2d_orth = zeropower_via_newtonschulz5(G2d, steps=ns_steps, eps=eps)
                     update = G2d_orth.view_as(W)
 
-                    # Muon step
                     W.add_(update, alpha=-cur_muon_lr)
                 else:
-                    # 1D params (biases, LN scales, etc.) use plain SGD-style step
                     W.add_(update_grad, alpha=-cur_sgd_lr)
 
                 state["momentum_buffer"] = buf
