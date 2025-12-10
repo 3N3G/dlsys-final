@@ -449,6 +449,9 @@ class SOAP(Optimizer):
 
     def step(self):
         """Perform one SOAP optimization step over all parameters."""
+        self.t += 1
+        cur_lr = self._current_lr()
+
         for p in self.params:
             if p.grad is None:
                 continue
@@ -485,7 +488,7 @@ class SOAP(Optimizer):
 
             denom = np.sqrt(exp_avg_sq) + self.eps
 
-            step_size = self.lr
+            step_size = cur_lr
             if self.correct_bias:
                 bias_c1 = 1.0 - beta1 ** t
                 bias_c2 = 1.0 - beta2 ** t
@@ -503,7 +506,7 @@ class SOAP(Optimizer):
             new_data = p.data - step_size * update_tensor
 
             if self.weight_decay > 0.0:
-                new_data = new_data - self.lr * self.weight_decay * p.data
+                new_data = new_data - cur_lr * self.weight_decay * p.data
 
             p.data = new_data
 
